@@ -37,8 +37,8 @@ def plot_heatmap(ax, image, heatmap, cmap="bwr", color=False, plot_img=True, sym
 
 
 def get_heatmaps(net, img, img_pos, query_points):
-    feats1, _ = net(img.cuda())
-    feats2, _ = net(img_pos.cuda())
+    feats1, _ = net(img.cpu())
+    feats2, _ = net(img_pos.cpu())
 
     sfeats1 = sample(feats1, query_points)
 
@@ -93,13 +93,13 @@ def my_app(cfg: DictConfig) -> None:
 
     data_dir = join(cfg.output_root, "data")
     if cfg.arch == "feature-pyramid":
-        cut_model = load_model(cfg.model_type, data_dir).cuda()
+        cut_model = load_model(cfg.model_type, data_dir).cpu()
         net = FeaturePyramidNet(cfg.granularity, cut_model, cfg.dim, cfg.continuous)
     elif cfg.arch == "dino":
         net = DinoFeaturizer(cfg.dim, cfg)
     else:
         raise ValueError("Unknown arch {}".format(cfg.arch))
-    net = net.cuda()
+    net = net.cpu()
 
     for batch_val in loader:
         batch = batch_val
@@ -122,7 +122,7 @@ def my_app(cfg: DictConfig) -> None:
                     [.5, .8],
                     [-.7, -.7],
                 ]
-            ).reshape(1, 3, 1, 2).cuda()
+            ).reshape(1, 3, 1, 2).cpu()
 
             img = batch["img"][img_num:img_num + 1]
             img_pos = batch["img_pos"][img_num:img_num + 1]
@@ -170,7 +170,7 @@ def my_app(cfg: DictConfig) -> None:
                             np.linspace(key_points[i][0], key_points[i + 1][0], 50),
                             np.linspace(key_points[i][1], key_points[i + 1][1], 50),
                         ], axis=1).tolist())
-            query_points = torch.tensor(all_points).reshape(1, len(all_points), 1, 2).cuda()
+            query_points = torch.tensor(all_points).reshape(1, len(all_points), 1, 2).cpu()
 
 
             plt.style.use('dark_background')

@@ -14,6 +14,7 @@ chaos_n_classes: 5          # use 2 if CT only, 5 if MR or all
 
 num_neighbors: 7
 dataset_name: "chaos"
+use_preprocessed_data: True
 
 # Used if dataset_name is "directory"
 dir_dataset_name: ~
@@ -22,8 +23,8 @@ dir_dataset_n_classes: 5
 has_labels: False
 crop_type: "five"
 crop_ratio: .5
-res: 320
-loader_crop_type: ~
+res: 224
+loader_crop_type: "center"
 
 # Model Params
 extra_clusters: 0

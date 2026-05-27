@@ -1,17 +1,19 @@
-output_root: '../'
+output_root: '/content/drive/MyDrive/STEGO/outputs'
 
 # REQUIRED for CHAOS dataset
-pytorch_data_dir: '/content/drive/MyDrive/STEGO/src/pytorch_data_dir'
+pytorch_data_dir: '/content/drive/MyDrive/STEGO/src/pytorch_data_dir/archive/CHAOS_Train_Sets/Train_Sets/CT/1'
 
-# Your trained CHAOS checkpoint (IMPORTANT)
-model_path: "/content/drive/MyDrive/STEGO/checkpoints/chaos/chaos_chaos_date_Apr13_15-33-24/epoch=1-step=900.ckpt"
+# Your trained CHAOS checkpoint
+model_path: "/content/drive/MyDrive/STEGO/checkpoints/chaos/mIoU=46.8485.ckpt"
 
 experiment_name: "chaos_demo"
 
-res: 224          # match training resolution
+# Directory containing DICOM files to run inference on
+image_dir: "/content/drive/MyDrive/STEGO/src/pytorch_data_dir/archive/CHAOS_Test_Sets/Test_Sets"
+
+res: 320
 batch_size: 8
 num_workers: 2
-
 use_ddp: False
 
 hydra:

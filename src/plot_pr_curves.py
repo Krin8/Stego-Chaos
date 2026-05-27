@@ -79,7 +79,7 @@ class LitRecalibrator(pl.LightningModule):
             dim = cfg.dim
 
         data_dir = join(cfg.output_root, "data")
-        self.moco = FeaturePyramidNet(cfg.granularity, load_model("mocov2", data_dir).cuda(), dim, cfg.continuous)
+        self.moco = FeaturePyramidNet(cfg.granularity, load_model("mocov2", data_dir).cpu(), dim, cfg.continuous)
         # self.dino = DinoFeaturizer(dim, cfg)
         # self.dino = LitUnsupervisedSegmenter.load_from_checkpoint("../models/vit_base_cocostuff27.ckpt").net
         # self.crf = CRFModule()
@@ -280,7 +280,7 @@ def my_app(cfg: DictConfig) -> None:
     trainer = Trainer(
         log_every_n_steps=10,
         val_check_interval=steps,
-        gpus=1,
+        accelerator='cpu', devices=1,
         max_steps=steps,
         limit_val_batches=100,
         accelerator="ddp",

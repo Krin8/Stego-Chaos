@@ -5,9 +5,9 @@ from os.path import join
 import numpy as np
 import torch
 import torch.multiprocessing
-from PIL import Image, ImageOps
+from PIL import Image
 import pydicom
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 
@@ -99,7 +99,7 @@ class CHAOS(Dataset):
     MODALITIES = ("CT", "T1DUAL", "T2SPIR")
 
     def __init__(self, root, modality, image_set, transform, target_transform,
-                 n_classes=5):
+                 n_classes=5, use_preprocessed=False):
         super().__init__()
         assert modality in (*self.MODALITIES, "all"), \
             f"modality must be one of {self.MODALITIES + ('all',)}"
@@ -110,9 +110,11 @@ class CHAOS(Dataset):
         self.transform        = transform
         self.target_transform = target_transform
         self.n_classes        = n_classes
+        self.use_preprocessed = use_preprocessed
 
         # Root of the actual CHAOS train data (verified path)
         self.train_root = join(root, "archive", "CHAOS_Train_Sets", "Train_Sets")
+        self.preprocessed_root = join(os.path.dirname(__file__), "preprocessed")
 
         # Each entry: (dcm_path, mask_path_or_None, modality_tag, patient_id)
         self.samples: list = []
@@ -120,7 +122,7 @@ class CHAOS(Dataset):
 
         # Patient-level 80/20 split — all slices of a patient stay together
         # so there is no cross-patient leakage between train and val.
-        if image_set != "all":
+        if image_set != "all" and not self.use_preprocessed:
             all_patients = sorted(set(s[3] for s in self.samples))
             n_val = max(1, int(0.2 * len(all_patients)))
             val_patients = set(all_patients[-n_val:])
@@ -129,23 +131,31 @@ class CHAOS(Dataset):
             else:
                 self.samples = [s for s in self.samples if s[3] not in val_patients]
 
-        # Filter out pure-background slices from training to focus on
-        # informative samples and improve contrastive learning signal.
-        if image_set == "train":
-            before = len(self.samples)
-            self.samples = [s for s in self.samples
-                            if s[1] is not None and self._has_foreground(s[1], s[2])]
-            after = len(self.samples)
-            print(f"[CHAOS] Filtered empty BG slices: {before} → {after} "
-                  f"({before - after} removed)")
-
     # ------------------------------------------------------------------
     # Sample collection — exact paths from screenshots
     # ------------------------------------------------------------------
 
     def _collect_samples(self):
-        mods_wanted = self.MODALITIES if self.modality == "all" \
-                      else (self.modality,)
+        mods_wanted = self.MODALITIES if self.modality == "all" else (self.modality,)
+
+        if self.use_preprocessed:
+            image_sets = ["train", "val"] if self.image_set == "all" else [self.image_set]
+            for iset in image_sets:
+                images_dir = join(self.preprocessed_root, iset, "images")
+                labels_dir = join(self.preprocessed_root, iset, "labels")
+                if not os.path.isdir(images_dir):
+                    continue
+                img_files = sorted(f for f in os.listdir(images_dir) if f.endswith(".png"))
+                for img_f in img_files:
+                    if not img_f.startswith(tuple(mods_wanted)):
+                        continue
+                    img_path = join(images_dir, img_f)
+                    lbl_path = join(labels_dir, img_f)
+                    if not os.path.exists(lbl_path):
+                        lbl_path = None
+                    mod = img_f.split("_")[0]
+                    self.samples.append((img_path, lbl_path, mod, img_f))
+            return
 
         if "CT" in mods_wanted:
             ct_root = join(self.train_root, "CT")
@@ -220,37 +230,11 @@ class CHAOS(Dataset):
     def _load_dicom_as_pil(dcm_path: str) -> Image.Image:
         dcm = pydicom.dcmread(dcm_path)
         arr = dcm.pixel_array.astype(np.float32)
-
-        # Apply HU conversion for CT
-        if hasattr(dcm, 'RescaleSlope') and hasattr(dcm, 'RescaleIntercept'):
-            arr = arr * float(dcm.RescaleSlope) + float(dcm.RescaleIntercept)
-
-        # Modality-aware windowing
-        is_ct = hasattr(dcm, 'Modality') and dcm.Modality == 'CT'
-        if is_ct:
-            # Soft-tissue abdominal window optimized for liver/kidney/spleen.
-            # Standard clinical window: WC=50, WW=400 → HU range [-150, 250].
-            # Much tighter than p1/p99 (~2300 HU) which washes out organ contrast.
-            wc, ww = 50, 400
-            lo, hi = wc - ww / 2, wc + ww / 2
-        else:
-            # MRI: no HU scale, use per-image percentile normalization
-            lo, hi = np.percentile(arr, (1, 99))
-
-        arr = np.clip(arr, lo, hi)
-        if hi > lo:
-            arr = (arr - lo) / (hi - lo)
-        else:
-            arr = np.zeros_like(arr)
-
+        arr -= arr.min()
+        if arr.max() > 0:
+            arr /= arr.max()
         arr = (arr * 255).astype(np.uint8)
-
-        # Apply CLAHE (histogram equalization) to boost local contrast.
-        # DINO was pre-trained on natural images with rich texture/contrast;
-        # raw DICOM→8-bit loses important local contrast that CLAHE restores.
-        img = Image.fromarray(arr, mode="L")
-        img = ImageOps.equalize(img)
-        return img.convert("RGB")
+        return Image.fromarray(arr).convert("RGB")
 
     # ------------------------------------------------------------------
     # Ground PNG → uint8 class-index PIL Image (mode "L")
@@ -267,16 +251,6 @@ class CHAOS(Dataset):
             label[raw == px] = cls
         return Image.fromarray(label, mode="L")
 
-    @staticmethod
-    def _has_foreground(mask_path: str, modality: str) -> bool:
-        """Return True if the mask contains at least one foreground pixel."""
-        raw = np.array(Image.open(mask_path).convert("L"))
-        lut = _CT_PIXEL_TO_CLASS if modality == "CT" else _MRI_PIXEL_TO_CLASS
-        for px, cls in lut.items():
-            if cls > 0 and (raw == px).any():
-                return True
-        return False
-
     # ------------------------------------------------------------------
     # Dataset interface
     # ------------------------------------------------------------------
@@ -287,7 +261,10 @@ class CHAOS(Dataset):
     def __getitem__(self, index):
         dcm_path, mask_path, mod, _ = self.samples[index]
 
-        img = self._load_dicom_as_pil(dcm_path)
+        if self.use_preprocessed:
+            img = Image.open(dcm_path).convert("RGB")
+        else:
+            img = self._load_dicom_as_pil(dcm_path)
 
         seed = np.random.randint(2147483647)
 
@@ -339,44 +316,88 @@ class MaterializedDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class ContrastiveSegDataset(Dataset):
+    def __init__(self,
+                 pytorch_data_dir,
+                 dataset_name,
+                 crop_type,
+                 image_set,
+                 transform,
+                 target_transform,
+                 cfg,
+                 aug_geometric_transform=None,
+                 aug_photometric_transform=None,
+                 num_neighbors=5,
+                 compute_knns=False,
+                 mask=False,
+                 pos_labels=False,
+                 pos_images=False,
+                 extra_transform=None,
+                 model_type_override=None
+                 ):
+        super(ContrastiveSegDataset).__init__()
 
-    def __init__(
-        self,
-        pytorch_data_dir,
-        dataset_name,
-        crop_type,              # ignored — kept for API compatibility
-        image_set,
-        transform,
-        target_transform,
-        cfg,
-        aug_geometric_transform=None,
-        aug_photometric_transform=None,
-        mask=False,
-        extra_transform=None,
-        model_type_override=None,
-    ):
-        super().__init__()
+        self.num_neighbors = num_neighbors
+        self.image_set = image_set
+        self.dataset_name = dataset_name
+        self.mask = mask
+        self.pos_labels = pos_labels
+        self.pos_images = pos_images
+        self.extra_transform = extra_transform
 
-        # assert dataset_name == "chaos", \
-        #     f"This datasets.py only supports dataset_name='chaos', got '{dataset_name}'"
+        if dataset_name == "chaos":
+            self.n_classes = getattr(cfg, "chaos_n_classes", 5)
+            dataset_class = CHAOS
+            extra_args = dict(
+                modality=getattr(cfg, "chaos_modality", "all"),
+                n_classes=self.n_classes,
+                use_preprocessed=getattr(cfg, "use_preprocessed_data", False)
+            )
+        else:
+            raise ValueError("Unknown dataset: {}".format(dataset_name))
 
-        self.mask                      = mask
-        self.extra_transform           = extra_transform
-        self.aug_geometric_transform   = aug_geometric_transform
+        self.aug_geometric_transform = aug_geometric_transform
         self.aug_photometric_transform = aug_photometric_transform
 
-        modality  = getattr(cfg, "chaos_modality",  "all")
-        n_classes = getattr(cfg, "chaos_n_classes", 5)
-        self.n_classes = n_classes
-
-        self.dataset = CHAOS(
-            root             = pytorch_data_dir,
-            modality         = modality,
-            image_set        = image_set,
-            transform        = transform,
-            target_transform = target_transform,
-            n_classes        = n_classes,
+        self.dataset = dataset_class(
+            root=pytorch_data_dir,
+            image_set=self.image_set,
+            transform=transform,
+            target_transform=target_transform,
+            **extra_args
         )
+
+        if model_type_override is not None:
+            model_type = model_type_override
+        else:
+            model_type = cfg.model_type
+
+        nice_dataset_name = dataset_name
+        if getattr(cfg, "use_preprocessed_data", False):
+            nice_dataset_name += "_preprocessed"
+        feature_cache_file = join(
+            pytorch_data_dir,
+            "nns",
+            "nns_{}_{}_{}_{}_{}.npz".format(
+                model_type,
+                nice_dataset_name,
+                image_set,
+                crop_type,
+                cfg.res
+            )
+        )
+
+        if pos_labels or pos_images:
+            if not os.path.exists(feature_cache_file) or compute_knns:
+                raise ValueError(
+                    "could not find nn file {} please run precompute_knns".format(
+                        feature_cache_file
+                    )
+                )
+            else:
+                loaded = np.load(feature_cache_file)
+                self.nns = loaded["nns"]
+
+            assert len(self.dataset) == self.nns.shape[0]
 
     def __len__(self):
         return len(self.dataset)
@@ -385,84 +406,69 @@ class ContrastiveSegDataset(Dataset):
         random.seed(seed)
         torch.manual_seed(seed)
 
-    def compute_sample_weights(self):
-        """Compute per-sample weights for WeightedRandomSampler.
-
-        Slices with rare organ classes get higher weight so that the
-        model sees a class-balanced distribution during training.
-        """
-        class_counts = np.zeros(self.n_classes, dtype=np.float64)
-        sample_class_presence = []
-
-        for dcm_path, mask_path, mod, pid in self.dataset.samples:
-            if mask_path is None or not os.path.exists(mask_path):
-                sample_class_presence.append(set())
-                continue
-            raw = np.array(Image.open(mask_path).convert("L"))
-            lut = _CT_PIXEL_TO_CLASS if mod == "CT" else _MRI_PIXEL_TO_CLASS
-            present = set()
-            for px, cls in lut.items():
-                if cls > 0 and (raw == px).any():
-                    present.add(cls)
-                    class_counts[cls] += 1
-            sample_class_presence.append(present)
-
-        # Inverse-frequency weights per class (background gets weight 1)
-        class_weights = np.ones(self.n_classes, dtype=np.float64)
-        for c in range(1, self.n_classes):
-            if class_counts[c] > 0:
-                class_weights[c] = 1.0 / class_counts[c]
-        # Normalize so max weight = 1
-        class_weights /= class_weights.max()
-
-        # Per-sample weight = max of the weights of classes present
-        weights = []
-        for present in sample_class_presence:
-            if not present:
-                weights.append(class_weights[0])
-            else:
-                weights.append(max(class_weights[c] for c in present))
-
-        return torch.tensor(weights, dtype=torch.float64)
-
     def __getitem__(self, ind):
-        pack = self.dataset[ind]   # (img, label, valid_mask)
+
+        pack = self.dataset[ind]
+
+        if self.pos_images or self.pos_labels:
+            ind_pos = self.nns[ind][
+                torch.randint(
+                    low=1,
+                    high=self.num_neighbors + 1,
+                    size=[]
+                ).item()
+            ]
+
+            pack_pos = self.dataset[ind_pos]
 
         seed = np.random.randint(2147483647)
+
         self._set_seed(seed)
 
-        # Spatial coordinate grid — used by some EAGLE loss terms
         coord_entries = torch.meshgrid(
-            [torch.linspace(-1, 1, pack[0].shape[1]),
-             torch.linspace(-1, 1, pack[0].shape[2])],
-            indexing="ij"
+            [
+                torch.linspace(-1, 1, pack[0].shape[1]),
+                torch.linspace(-1, 1, pack[0].shape[2])
+            ]
         )
-        coord = torch.cat([t.unsqueeze(0) for t in coord_entries], 0)
 
-        extra = self.extra_transform \
-                if self.extra_transform is not None else lambda i, x: x
+        coord = torch.cat(
+            [t.unsqueeze(0) for t in coord_entries],
+            0
+        )
 
-        # Apply geometric augmentation to img_pos so that contrastive
-        # learning gets a meaningfully different view of the same image.
-        # Previously img_pos was identical to img, producing trivial pairs.
-        if self.aug_geometric_transform is not None:
-            img_pos = self.aug_geometric_transform(pack[0])
+        if self.extra_transform is not None:
+            extra_trans = self.extra_transform
         else:
-            img_pos = pack[0].clone()
+            extra_trans = lambda i, x: x
 
         ret = {
-            "ind":       ind,
-            "img":       extra(ind, pack[0]),
-            "label":     extra(ind, pack[1]),
-            "img_pos":   extra(ind, img_pos),
-            "label_pos": extra(ind, pack[1]),
-            "coord":     coord,
+            "ind": ind,
+            "img": extra_trans(ind, pack[0]),
+            "label": extra_trans(ind, pack[1]),
         }
+
+        if self.pos_images:
+            ret["img_pos"] = extra_trans(ind, pack_pos[0])
+            ret["ind_pos"] = ind_pos
 
         if self.mask:
             ret["mask"] = pack[2]
 
+        if self.pos_labels:
+            ret["label_pos"] = extra_trans(ind, pack_pos[1])
+            ret["mask_pos"] = pack_pos[2]
+
         if self.aug_photometric_transform is not None:
-            ret["img_pos_aug"] = self.aug_photometric_transform(ret["img_pos"])
+            img_aug = self.aug_photometric_transform(
+                self.aug_geometric_transform(pack[0])
+            )
+
+            self._set_seed(seed)
+
+            coord_aug = self.aug_geometric_transform(coord)
+
+            ret["img_aug"] = img_aug
+            ret["coord_aug"] = coord_aug.permute(1, 2, 0)
 
         return ret

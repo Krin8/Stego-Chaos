@@ -1,36 +1,15 @@
 import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-
 from utils import *
 from modules import *
 from data import *
 from torch.utils.data import DataLoader
-from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
 from datetime import datetime
 import hydra
 from omegaconf import DictConfig, OmegaConf
-
-# Monkey-patch for Hydra with Python 3.14+
-import sys
-import argparse
-from hydra._internal.utils import get_args_parser as _orig_get_args_parser
-_orig_add_argument = argparse.ArgumentParser.add_argument
-def _patched_add_argument(self, *args, **kwargs):
-    if kwargs.get('help') and type(kwargs['help']).__name__ == 'LazyCompletionHelp':
-        kwargs['help'] = 'Install or Uninstall shell completion'
-    return _orig_add_argument(self, *args, **kwargs)
-def _patched_get_args_parser():
-    argparse.ArgumentParser.add_argument = _patched_add_argument
-    try:
-        return _orig_get_args_parser()
-    finally:
-        argparse.ArgumentParser.add_argument = _orig_add_argument
-sys.modules["hydra.main"].get_args_parser = _patched_get_args_parser
-
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
-from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 from pytorch_lightning import seed_everything
 import torch.multiprocessing
 import seaborn as sns
@@ -48,8 +27,7 @@ def get_class_labels(dataset_name):
 
 class LitUnsupervisedSegmenter(pl.LightningModule):
     def __init__(self, n_classes, cfg):
-        self.val_steps = 0
-        self.validation_outputs = {}   # <-- ADD THIS
+        self.validation_step_outputs = []
         self.save_hyperparameters()
         super().__init__()
         self.cfg = cfg
@@ -61,9 +39,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             dim = cfg.dim
 
         data_dir = join(cfg.output_root, "data")
-        device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
         if cfg.arch == "feature-pyramid":
-            cut_model = load_model(cfg.model_type, data_dir).to(device)
+            cut_model = load_model(cfg.model_type, data_dir).cpu()
             self.net = FeaturePyramidNet(cfg.granularity, cut_model, dim, cfg.continuous)
         elif cfg.arch == "dino":
             self.net = DinoFeaturizer(dim, cfg)
@@ -97,9 +74,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         self.automatic_optimization = False
 
-        if self.cfg.dataset_name.startswith("cityscapes"):
-            self.label_cmap = create_cityscapes_colormap()
-        elif self.cfg.dataset_name == "chaos":
+        if self.cfg.dataset_name == "chaos":
             self.label_cmap = create_chaos_colormap()
         else:
             self.label_cmap = create_pascal_label_colormap()
@@ -123,9 +98,9 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         with torch.no_grad():
             ind = batch["ind"]
             img = batch["img"]
-            # img_aug = batch["img_aug"]
-            # coord_aug = batch["coord_aug"]
-            img_pos = batch.get("img_pos_aug", batch["img_pos"])
+            img_aug = batch["img_aug"]
+            coord_aug = batch["coord_aug"]
+            img_pos = batch["img_pos"]
             label = batch["label"]
             label_pos = batch["label_pos"]
 
@@ -270,12 +245,11 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             cluster_preds = cluster_preds.argmax(1)
             self.cluster_metrics.update(cluster_preds, label)
 
-            self.validation_outputs = {
+            self.validation_step_outputs.append({
                 'img': img[:self.cfg.n_images].detach().cpu(),
                 'linear_preds': linear_preds[:self.cfg.n_images].detach().cpu(),
                 "cluster_preds": cluster_preds[:self.cfg.n_images].detach().cpu(),
-                "label": label[:self.cfg.n_images].detach().cpu()
-            }
+                "label": label[:self.cfg.n_images].detach().cpu()})
 
     def on_validation_epoch_end(self) -> None:
         with torch.no_grad():
@@ -285,7 +259,9 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             }
 
             if self.trainer.is_global_zero and not self.cfg.submitting_to_aml:
-                output = {k: v.detach().cpu() for k, v in self.validation_outputs.items()}
+                import random
+                output_num = random.randint(0, len(self.validation_step_outputs) - 1)
+                output = {k: v.detach().cpu() for k, v in self.validation_step_outputs[output_num].items()}
 
                 fig, ax = plt.subplots(4, self.cfg.n_images, figsize=(self.cfg.n_images * 3, 4 * 3))
                 for i in range(self.cfg.n_images):
@@ -299,7 +275,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                 ax[3, 0].set_ylabel("Cluster Probe", fontsize=16)
                 remove_axes(ax)
                 plt.tight_layout()
-                add_plot(self.logger.experiment, "plot_labels", self.global_step)
+                add_plot([l.experiment for l in self.loggers], "plot_labels", self.global_step)
 
                 if self.cfg.has_labels:
                     fig = plt.figure(figsize=(13, 10))
@@ -325,7 +301,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                     ax.vlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_xlim())
                     ax.hlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_ylim())
                     plt.tight_layout()
-                    add_plot(self.logger.experiment, "conf_matrix", self.global_step)
+                    add_plot([l.experiment for l in self.loggers], "conf_matrix", self.global_step)
 
                     all_bars = torch.cat([
                         self.cluster_metrics.histogram.sum(0).cpu(),
@@ -354,7 +330,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                     ax[1].tick_params(axis='x', labelrotation=90)
 
                     plt.tight_layout()
-                    add_plot(self.logger.experiment, "label frequency", self.global_step)
+                    add_plot([l.experiment for l in self.loggers], "label frequency", self.global_step)
 
             if self.global_step > 2:
                 self.log_dict(tb_metrics)
@@ -367,6 +343,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
             self.linear_metrics.reset()
             self.cluster_metrics.reset()
+            self.validation_step_outputs.clear()
 
     def configure_optimizers(self):
         main_params = list(self.net.parameters())
@@ -408,8 +385,9 @@ def my_app(cfg: DictConfig) -> None:
         T.RandomResizedCrop(size=cfg.res, scale=(0.8, 1.0))
     ])
     photometric_transforms = T.Compose([
-        T.ColorJitter(brightness=.3, contrast=.3, saturation=0, hue=0),
-        T.RandomApply([T.GaussianBlur((5, 5))], p=0.3),
+        T.ColorJitter(brightness=.3, contrast=.3, saturation=.3, hue=.1),
+        T.RandomGrayscale(.2),
+        T.RandomApply([T.GaussianBlur((5, 5))])
     ])
 
     sys.stdout.flush()
@@ -424,13 +402,13 @@ def my_app(cfg: DictConfig) -> None:
         cfg=cfg,
         aug_geometric_transform=geometric_transforms,
         aug_photometric_transform=photometric_transforms,
-        # num_neighbors=cfg.num_neighbors,
+        num_neighbors=cfg.num_neighbors,
         mask=True,
-        # pos_images=True,
-        # pos_labels=True
+        pos_images=True,
+        pos_labels=True
     )
 
-    if cfg.dataset_name == "voc" or cfg.dataset_name == "chaos":
+    if cfg.dataset_name == "chaos":
         val_loader_crop = None
     else:
         val_loader_crop = "center"
@@ -446,19 +424,7 @@ def my_app(cfg: DictConfig) -> None:
         cfg=cfg,
     )
 
-    # Weighted sampling: oversample slices with rare organ classes
-    # (kidneys, spleen) to balance the class distribution.
-    sample_weights = train_dataset.compute_sample_weights()
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(train_dataset),
-        replacement=True,
-    )
-    train_loader = DataLoader(
-        train_dataset, cfg.batch_size,
-        sampler=sampler,
-        num_workers=cfg.num_workers, pin_memory=True,
-    )
+    train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
 
     if cfg.submitting_to_aml:
         val_batch_size = 16
@@ -473,26 +439,32 @@ def my_app(cfg: DictConfig) -> None:
         join(log_dir, name),
         default_hp_metric=False
     )
+    wandb_logger = WandbLogger(
+        name=name,
+        project="STEGO",
+        save_dir=log_dir
+    )
 
     if cfg.submitting_to_aml:
-        gpu_args = dict(accelerator='auto', devices=1, val_check_interval=250)
+        gpu_args = dict(accelerator='cpu', devices=1, val_check_interval=250)
 
         if gpu_args["val_check_interval"] > len(train_loader):
             gpu_args.pop("val_check_interval")
 
     else:
-        gpu_args = dict(accelerator='auto', devices=1, val_check_interval=cfg.val_freq)
+        gpu_args = dict(accelerator='cpu', devices=1, val_check_interval=cfg.val_freq)
 
         if gpu_args["val_check_interval"] > len(train_loader) // 4:
             gpu_args.pop("val_check_interval")
 
     trainer = Trainer(
         log_every_n_steps=cfg.scalar_log_freq,
-        logger=tb_logger,
+        logger=[tb_logger, wandb_logger],
         max_steps=cfg.max_steps,
         callbacks=[
             ModelCheckpoint(
                 dirpath=join(checkpoint_dir, name),
+                filename="checkpoint-{epoch:02d}-{step:04d}-mIoU={test/cluster/mIoU:.4f}",
                 every_n_train_steps=100,
                 save_top_k=1,
                 monitor="test/cluster/mIoU",
