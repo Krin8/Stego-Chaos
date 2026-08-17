@@ -1,0 +1,4 @@
+[2026-07-07 11:23:53,338][root][INFO] - Loaded biomedclip_local model config.
+[2026-07-07 11:23:56,311][root][INFO] - Loading pretrained biomedclip_local weights (C:\Users\Ram caddysy\Downloads\src 2\src\BiomedCLIP-PubMedBERT_256-vit_base_patch16_224\open_clip_pytorch_model.bin).
+[2026-07-07 14:15:53,644][root][INFO] - Loaded biomedclip_local model config.
+[2026-07-07 14:15:56,335][root][INFO] - Loading pretrained biomedclip_local weights (C:\Users\Ram caddysy\Downloads\src 2\src\BiomedCLIP-PubMedBERT_256-vit_base_patch16_224\open_clip_pytorch_model.bin).

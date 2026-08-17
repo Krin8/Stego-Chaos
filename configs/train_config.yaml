@@ -1,0 +1,103 @@
+output_root: '../'
+pytorch_data_dir: 'c:/Users/Ram caddysy/Downloads/src 2/pytorch_data_dir'
+experiment_name: "chaos"
+log_dir: "chaos"
+azureml_logging: False
+submitting_to_aml: False
+
+# Loader params
+num_workers: 0
+max_steps: 5000
+batch_size: 16
+chaos_modality: "CT"       # or "CT" or "T1DUAL" or "T2SPIR"
+chaos_n_classes: 2          # use 2 if CT only, 5 if MR or all
+
+num_neighbors: 7
+dataset_name: "chaos"
+use_preprocessed_data: True
+use_nns: True
+
+# Used if dataset_name is "directory"
+dir_dataset_name: ~
+dir_dataset_n_classes: 5
+
+has_labels: True
+crop_type: "five"
+crop_ratio: .75
+res: 320
+loader_crop_type: "center"
+
+# Model Params
+extra_clusters: 1
+use_true_labels: False
+use_recalibrator: False
+model_type: "vit_base"
+arch: "biomedclip"
+use_fit_model: True
+use_text_prompts: False
+text_align_weight: 0.3
+shallow_layer_n: 7          # how many blocks from end to tap: 7→block6, 5→block8, 4→block9(old)
+dino_feat_type: "feat"
+projection_type: "nonlinear"
+#projection_type: linear
+dino_patch_size: 16
+granularity: 1
+continuous: True
+dim: 70
+dropout: True
+zero_clamp: True
+
+lr: 5e-4
+backbone_lr: 1e-6
+pretrained_weights: ~
+use_salience: True
+stabalize: False
+stop_at_zero: True
+
+# Feature Contrastive params
+pointwise: True
+feature_samples: 20
+neg_samples: 10
+aug_alignment_weight: 1.0
+
+correspondence_weight: 1.0
+
+
+# IAROA vit small 1/31/22
+neg_inter_weight: 0.2
+pos_inter_weight: 0.25
+pos_intra_weight: 0.75
+neg_inter_shift: 0.46
+pos_inter_shift: 0.12
+pos_intra_shift: 0.18
+
+rec_weight: 0.5
+repulsion_weight: 0.0
+
+# CRF Params
+crf_weight: 0.5  # Increased for better boundary snapping
+alpha: .5
+beta: .1
+gamma: .05
+w1: 10.0
+w2: 3.0
+shift: 0.00
+crf_samples: 2000
+color_space: "rgb"
+
+reset_probe_steps: 1000
+
+# Logging params
+n_images: 5
+scalar_log_freq: 10
+checkpoint_freq: 50
+val_freq: 100
+hist_freq: 100
+
+
+hydra:
+  run:
+    dir: "."
+  output_subdir: ~
+  #job_logging: "disabled"
+  #hydra_logging: "disabled"
