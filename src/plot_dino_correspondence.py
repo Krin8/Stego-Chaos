@@ -1,7 +1,7 @@
 import os
 from os.path import join
 from utils import get_transform, load_model, prep_for_plot, remove_axes, prep_args
-from modules import FeaturePyramidNet, DinoFeaturizer, sample
+from modules import FeaturePyramidNet, DinoFeaturizer, BiomedCLIPFeaturizer, sample
 from data import ContrastiveSegDataset
 import hydra
 import matplotlib.animation as animation
@@ -36,11 +36,11 @@ def plot_heatmap(ax, image, heatmap, cmap="bwr", color=False, plot_img=True, sym
         return [ax.imshow(heatmap, alpha=.5, cmap=cmap, **kwargs)]
 
 
-def get_heatmaps(net, img, img_pos, query_points):
-    feats1, _ = net(img.cpu())
-    feats2, _ = net(img_pos.cpu())
+def get_heatmaps(net, img, img_pos, query_points, device):
+    feats1, _ = net(img.to(device))
+    feats2, _ = net(img_pos.to(device))
 
-    sfeats1 = sample(feats1, query_points)
+    sfeats1 = sample(feats1, query_points.to(device))
 
     attn_intra = torch.einsum("nchw,ncij->nhwij", F.normalize(sfeats1, dim=1), F.normalize(feats1, dim=1))
     attn_intra -= attn_intra.mean([3, 4], keepdims=True)
@@ -91,15 +91,18 @@ def my_app(cfg: DictConfig) -> None:
         )
         loader = DataLoader(dataset, 16, shuffle=True, num_workers=cfg.num_workers)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data_dir = join(cfg.output_root, "data")
     if cfg.arch == "feature-pyramid":
-        cut_model = load_model(cfg.model_type, data_dir).cpu()
+        cut_model = load_model(cfg.model_type, data_dir).to(device)
         net = FeaturePyramidNet(cfg.granularity, cut_model, cfg.dim, cfg.continuous)
     elif cfg.arch == "dino":
         net = DinoFeaturizer(cfg.dim, cfg)
+    elif cfg.arch == "biomedclip":
+        net = BiomedCLIPFeaturizer(cfg.dim, cfg)
     else:
         raise ValueError("Unknown arch {}".format(cfg.arch))
-    net = net.cpu()
+    net = net.to(device)
 
     for batch_val in loader:
         batch = batch_val
@@ -135,7 +138,7 @@ def my_app(cfg: DictConfig) -> None:
             axes[2].set_title("KNN Correspondence", fontsize=20)
             fig.tight_layout()
 
-            heatmap_intra, heatmap_inter = get_heatmaps(net, img, img_pos, query_points)
+            heatmap_intra, heatmap_inter = get_heatmaps(net, img, img_pos, query_points, device)
             for point_num in range(query_points.shape[1]):
                 point = ((query_points[0, point_num, 0] + 1) / 2 * high_res).cpu()
                 img_point_h = point[0]
@@ -182,7 +185,7 @@ def my_app(cfg: DictConfig) -> None:
 
             fig.tight_layout()
 
-            heatmap_intra, heatmap_inter = get_heatmaps(net, img, img_pos, query_points)
+            heatmap_intra, heatmap_inter = get_heatmaps(net, img, img_pos, query_points, device)
 
             frames = []  # for storing the generated images
             for point_num in range(query_points.shape[1]):

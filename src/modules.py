@@ -29,7 +29,8 @@ class DinoFeaturizer(nn.Module):
             num_classes=0)
         for p in self.model.parameters():
             p.requires_grad = False
-        self.model.eval().cpu()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.eval().to(device)
         self.dropout = torch.nn.Dropout2d(p=.1)
 
         if arch == "vit_small" and patch_size == 16:
@@ -118,7 +119,151 @@ class DinoFeaturizer(nn.Module):
             return image_feat, code
 
 
+class BiomedCLIPFeaturizer(nn.Module):
+
+    def __init__(self, dim, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.dim = dim
+        self.patch_size = 16
+        
+        import os
+        import json
+        from open_clip import create_model_and_transforms
+        from open_clip.factory import HF_HUB_PREFIX, _MODEL_CONFIGS
+        from timm.layers import Format
+
+        base_dir = os.path.join(os.path.dirname(__file__), "BiomedCLIP-PubMedBERT_256-vit_base_patch16_224")
+        config_path = os.path.join(base_dir, "open_clip_config.json")
+        weights_path = os.path.join(base_dir, "open_clip_pytorch_model.bin")
+
+        with open(config_path, "r") as f:
+            config = json.load(f)
+            model_cfg = config["model_cfg"]
+            preprocess_cfg = config["preprocess_cfg"]
+
+        model_name = "biomedclip_local"
+        if (not model_name.startswith(HF_HUB_PREFIX)
+            and model_name not in _MODEL_CONFIGS
+            and config is not None):
+            _MODEL_CONFIGS[model_name] = model_cfg
+
+        model, _, preprocess = create_model_and_transforms(
+            model_name=model_name,
+            pretrained=weights_path,
+            **{f"image_{k}": v for k, v in preprocess_cfg.items()},
+        )
+
+        self.full_model = model
+        self.model = model.visual.trunk
+        self.use_text_prompts = getattr(cfg, "use_text_prompts", False)
+
+        # Configure for dynamic image size support (validation uses 320x320, training uses 224x224)
+        self.model.dynamic_img_size = True
+        self.model.patch_embed.strict_img_size = False
+        self.model.patch_embed.flatten = False
+        self.model.patch_embed.output_fmt = Format.NHWC
+
+        # Freeze the backbone parameters
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.eval().to(device)
+        self.dropout = torch.nn.Dropout2d(p=.1)
+
+        self.n_feats = 768
+
+        # ── Shallow-layer feature extraction ──────────────────────────
+        # shallow_layer_n: how many layers from the end to extract.
+        #   n=7 → block 6/12 (sharp edges + textures)
+        #   n=5 → block 8/12 (the previous default-equivalent)
+        #   n=4 → block 9/12 (old behaviour)
+        # We extract 2 consecutive layers and fuse them with a 1×1 conv
+        # so the network gets both the sharpest spatial detail AND one
+        # layer of additional semantic context.
+        self.shallow_layer_n = getattr(cfg, "shallow_layer_n", 7)
+        # Fusion: concatenate shallow + next-deeper → project back to n_feats
+        self.feat_fusion = torch.nn.Sequential(
+            torch.nn.Conv2d(self.n_feats * 2, self.n_feats, (1, 1)),
+            torch.nn.GELU(),
+        )
+
+        self.cluster1 = self.make_clusterer(self.n_feats)
+        self.proj_type = cfg.projection_type
+        if self.proj_type == "nonlinear":
+            self.cluster2 = self.make_nonlinear_clusterer(self.n_feats)
+
+    def make_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))
+
+    def make_nonlinear_clusterer(self, in_channels):
+        return torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels, in_channels, (1, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(in_channels, self.dim, (1, 1)))
+
+    def get_text_embeddings(self, prompts, device):
+        from open_clip import get_tokenizer
+        tokenizer = get_tokenizer("hf-hub:microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224")
+        text = tokenizer(prompts).to(device)
+        with torch.no_grad():
+            text_features = self.full_model.encode_text(text)
+        return text_features
+
+    def forward(self, img, n=None, return_class_feat=False):
+        if n is None:
+            n = self.shallow_layer_n  # default: 7 → extracts from block 6/12
+
+        self.model.eval()
+        with torch.no_grad():
+            assert (img.shape[2] % self.patch_size == 0)
+            assert (img.shape[3] % self.patch_size == 0)
+
+            # Extract n layers from the end of the ViT backbone.
+            # layers[0] = shallowest (sharpest edges/textures)
+            # layers[1] = one block deeper  (more semantic)
+            # With n=7 on a 12-block ViT:
+            #   layers[0] = block 6,  layers[1] = block 7, ...
+            layers = self.model.get_intermediate_layers(
+                img, n=max(n, 2), reshape=True
+            )
+
+            # Fuse the two shallowest extracted layers:
+            #   shallow (sharp spatial boundaries) + next-deeper (semantic)
+            shallow_feat = layers[0]   # sharpest edges & textures
+            deeper_feat  = layers[1]   # one block deeper, more semantic
+            image_feat = self.feat_fusion(
+                torch.cat([shallow_feat, deeper_feat], dim=1)
+            )
+
+            if return_class_feat:
+                return torch.zeros(img.shape[0], self.n_feats, 1, 1, device=img.device)
+
+        if self.use_text_prompts:
+            if hasattr(self.full_model.visual, 'head') and hasattr(self.full_model.visual.head, 'proj'):
+                code = image_feat.permute(0, 2, 3, 1)
+                code = self.full_model.visual.head.proj(code)
+                code = code.permute(0, 3, 1, 2)
+            else:
+                code = image_feat
+        else:
+            if self.proj_type is not None:
+                code = self.cluster1(self.dropout(image_feat))
+                if self.proj_type == "nonlinear":
+                    code += self.cluster2(self.dropout(image_feat))
+            else:
+                code = image_feat
+
+        if self.cfg.dropout:
+            return self.dropout(image_feat), code
+        else:
+            return image_feat, code
+
+
 class ResizeAndClassify(nn.Module):
+
 
     def __init__(self, dim: int, size: int, n_classes: int):
         super(ResizeAndClassify, self).__init__()
@@ -143,6 +288,11 @@ class ClusterLookup(nn.Module):
         with torch.no_grad():
             self.clusters.copy_(torch.randn(self.n_classes, self.dim))
 
+    def init_from(self, embeddings: torch.Tensor):
+        with torch.no_grad():
+            n = min(embeddings.shape[0], self.n_classes)
+            self.clusters.data[:n, :] = embeddings[:n, :].to(self.clusters.device)
+
     def forward(self, x, alpha, log_probs=False):
         normed_clusters = F.normalize(self.clusters, dim=1)
         normed_features = F.normalize(x, dim=1)
@@ -155,6 +305,12 @@ class ClusterLookup(nn.Module):
             cluster_probs = nn.functional.softmax(inner_products * alpha, dim=1)
 
         cluster_loss = -(cluster_probs * inner_products).sum(1).mean()
+        
+        # Marginal entropy maximization to prevent collapse
+        avg_probs = cluster_probs.mean(dim=(0, 2, 3))
+        entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
+        cluster_loss -= 0.5 * entropy
+
         if log_probs:
             return nn.functional.log_softmax(inner_products * alpha, dim=1)
         else:
@@ -285,7 +441,7 @@ def tensor_correlation(a, b):
 
 
 def sample(t: torch.Tensor, coords: torch.Tensor):
-    return F.grid_sample(t, coords.permute(0, 2, 1, 3), padding_mode='border', align_corners=True)
+    return F.grid_sample(t, coords.permute(0, 2, 1, 3), padding_mode='reflection', align_corners=True)
 
 
 @torch.jit.script

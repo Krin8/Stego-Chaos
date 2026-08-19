@@ -277,13 +277,13 @@ def my_app(cfg: DictConfig) -> None:
         default_hp_metric=False
     )
     steps = 1
+    accelerator_type = 'gpu' if torch.cuda.is_available() else 'cpu'
     trainer = Trainer(
         log_every_n_steps=10,
         val_check_interval=steps,
-        accelerator='cpu', devices=1,
+        accelerator=accelerator_type, devices=1,
         max_steps=steps,
         limit_val_batches=100,
-        accelerator="ddp",
         num_sanity_val_steps=0,
         logger=tb_logger,
     )

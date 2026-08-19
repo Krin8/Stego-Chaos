@@ -46,7 +46,19 @@ def add_plot(writer, name, step):
             w.add_image(name, image_tensor, step)
         elif hasattr(w, 'log'):
             import wandb
-            w.log({name: wandb.Image(image)}, step=step)
+            import tempfile, os
+            # Save to our own temp file to avoid wandb's broken
+            # temp-directory handling on Windows (short-path alias bug).
+            tmp_dir = tempfile.mkdtemp()
+            tmp_path = os.path.join(tmp_dir, f"{name.replace('/', '_')}_{step}.png")
+            image.save(tmp_path)
+            try:
+                w.log({name: wandb.Image(tmp_path)}, step=step)
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                if os.path.isdir(tmp_dir):
+                    os.rmdir(tmp_dir)
             
     plt.clf()
     plt.close()
@@ -232,7 +244,7 @@ class UnsupervisedMetrics(Metric):
         with torch.no_grad():
             actual = target.reshape(-1)
             preds = preds.reshape(-1)
-            mask = (actual >= 0) & (actual < self.n_classes) & (preds >= 0) & (preds < self.n_classes)
+            mask = (actual >= 0) & (actual < self.n_classes) & (preds >= 0) & (preds < self.n_classes + self.extra_clusters)
             actual = actual[mask]
             preds = preds[mask]
             self.stats += torch.bincount(
@@ -279,10 +291,15 @@ class UnsupervisedMetrics(Metric):
 
         iou = tp / (tp + fp + fn)
         prc = tp / (tp + fn)
-        opc = torch.sum(tp) / torch.sum(self.histogram)
+        
+        hist_sum = torch.sum(self.histogram)
+        opc = torch.sum(tp) / hist_sum if hist_sum > 0 else torch.tensor(0.0, device=tp.device)
 
-        metric_dict = {self.prefix + "mIoU": iou[~torch.isnan(iou)].mean().item(),
-                       self.prefix + "Accuracy": opc.item()}
+        valid_iou = iou[~torch.isnan(iou)]
+        miou = valid_iou.mean().item() if valid_iou.numel() > 0 else 0.0
+
+        metric_dict = {self.prefix + "mIoU": miou,
+                       self.prefix + "Accuracy": opc.item() if isinstance(opc, torch.Tensor) else opc}
         return {k: 100 * v for k, v in metric_dict.items()}
 
 

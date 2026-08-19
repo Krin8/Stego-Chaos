@@ -1,4 +1,7 @@
+import matplotlib
+matplotlib.use('Agg')
 import os
+from torch.optim.lr_scheduler import LambdaLR
 from utils import *
 from modules import *
 from data import *
@@ -27,29 +30,59 @@ def get_class_labels(dataset_name):
 
 class LitUnsupervisedSegmenter(pl.LightningModule):
     def __init__(self, n_classes, cfg):
-        self.validation_step_outputs = []
-        self.save_hyperparameters()
         super().__init__()
+        self.validation_step_outputs = []
         self.cfg = cfg
         self.n_classes = n_classes
 
-        if not cfg.continuous:
+        if getattr(cfg, "use_text_prompts", False):
+            dim = 512
+        elif not cfg.continuous:
             dim = n_classes
         else:
             dim = cfg.dim
 
         data_dir = join(cfg.output_root, "data")
         if cfg.arch == "feature-pyramid":
-            cut_model = load_model(cfg.model_type, data_dir).cpu()
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            cut_model = load_model(cfg.model_type, data_dir).to(device)
             self.net = FeaturePyramidNet(cfg.granularity, cut_model, dim, cfg.continuous)
         elif cfg.arch == "dino":
             self.net = DinoFeaturizer(dim, cfg)
+        elif cfg.arch == "biomedclip":
+            self.net = BiomedCLIPFeaturizer(dim, cfg)
         else:
             raise ValueError("Unknown arch {}".format(cfg.arch))
 
-        self.train_cluster_probe = ClusterLookup(dim, n_classes)
+        if getattr(cfg, "use_text_prompts", False):
+            if cfg.chaos_modality == "CT":
+                modality = "CT"
+            else:
+                modality = "MRI"
+            
+            class_labels = get_class_labels(cfg.dataset_name)
+            prompts = []
+            for label in class_labels:
+                if label == 'background':
+                    prompts.append(f"Abdominal background tissue in a {modality} scan")
+                else:
+                    prompts.append(f"A {modality} scan showing the {label}")
+            
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            text_embs = self.net.get_text_embeddings(prompts, device).detach()
+            self.register_buffer('text_embeddings', text_embs)
+        
+        else:
+            self.text_embeddings = None
 
+        self.train_cluster_probe = ClusterLookup(dim, n_classes)
         self.cluster_probe = ClusterLookup(dim, n_classes + cfg.extra_clusters)
+        
+        if self.text_embeddings is not None:
+            self.train_cluster_probe.init_from(self.text_embeddings)
+            # Only initialize the first n_classes slots; extra clusters stay random
+            self.cluster_probe.init_from(self.text_embeddings[:n_classes])
+
         self.linear_probe = nn.Conv2d(dim, n_classes, (1, 1))
 
         self.decoder = nn.Conv2d(dim, self.net.n_feats, (1, 1))
@@ -64,7 +97,13 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         self.test_linear_metrics = UnsupervisedMetrics(
             "final/linear/", n_classes, 0, False)
 
-        self.linear_probe_loss_fn = torch.nn.CrossEntropyLoss()
+        # Foreground-boosted class weights to combat background dominance
+        # Background gets weight 1.0, all foreground classes get 5.0
+        fg_weight = 5.0
+        class_weights = [1.0] + [fg_weight] * (n_classes - 1)
+        self.register_buffer('linear_probe_weights', torch.tensor(class_weights))
+        self.linear_probe_loss_fn = torch.nn.CrossEntropyLoss(weight=self.linear_probe_weights)
+        
         self.crf_loss_fn = ContrastiveCRFLoss(
             cfg.crf_samples, cfg.alpha, cfg.beta, cfg.gamma, cfg.w1, cfg.w2, cfg.shift)
 
@@ -114,7 +153,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             signal_pos = one_hot_feats(label_pos + 1, self.n_classes + 1)
         else:
             signal = feats
-            signal_pos = feats_pos
+            signal_pos = feats_pos if self.cfg.correspondence_weight > 0 else None
 
         loss = 0
 
@@ -176,13 +215,24 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             self.log('loss/aug_alignment', aug_alignment, **log_args)
             loss += self.cfg.aug_alignment_weight * aug_alignment
 
-        if self.cfg.crf_weight > 0:
+        crf_weight = getattr(self.cfg, 'crf_weight', 0.5)
+        if crf_weight > 0:
             crf = self.crf_loss_fn(
                 resize(img, 56),
                 norm(resize(code, 56))
             ).mean()
             self.log('loss/crf', crf, **log_args)
-            loss += self.cfg.crf_weight * crf
+            loss += crf_weight * crf
+
+        if getattr(self.cfg, "use_text_prompts", False) and getattr(self, "text_embeddings", None) is not None:
+            normed_code = F.normalize(code, dim=1)
+            normed_text = F.normalize(self.text_embeddings, dim=1).to(code.device)
+            sim = torch.einsum("bchw,nc->bnhw", normed_code, normed_text) / 0.07
+            soft_probs = F.softmax(sim, dim=1)
+            entropy = -(soft_probs * torch.log(soft_probs + 1e-6)).sum(dim=1)
+            text_align_loss = entropy.mean()
+            self.log('loss/text_align', text_align_loss, **log_args)
+            loss += getattr(self.cfg, "text_align_weight", 0.3) * text_align_loss
 
         flat_label = label.reshape(-1)
         mask = (flat_label >= 0) & (flat_label < self.n_classes)
@@ -196,7 +246,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         loss += linear_loss
         self.log('loss/linear', linear_loss, **log_args)
 
-        cluster_loss, cluster_probs = self.cluster_probe(detached_code, None)
+        cluster_loss, cluster_probs = self.cluster_probe(detached_code, alpha=10.0)
         loss += cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)
         self.log('loss/total', loss, **log_args)
@@ -206,12 +256,15 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         cluster_probe_optim.step()
         linear_probe_optim.step()
 
-        if self.cfg.reset_probe_steps is not None and self.global_step == self.cfg.reset_probe_steps:
-            print("RESETTING PROBES")
-            self.linear_probe.reset_parameters()
-            self.cluster_probe.reset_parameters()
-            self.trainer.optimizers[1] = torch.optim.Adam(list(self.linear_probe.parameters()), lr=5e-3)
-            self.trainer.optimizers[2] = torch.optim.Adam(list(self.cluster_probe.parameters()), lr=5e-3)
+        # Step all LR schedulers (net cosine decay + cluster warmup)
+        schedulers = self.lr_schedulers()
+        if schedulers is not None:
+            if isinstance(schedulers, list):
+                for sched in schedulers:
+                    sched.step()
+            else:
+                schedulers.step()
+
 
         if self.global_step % 2000 == 0 and self.global_step > 0:
             print("RESETTING TFEVENT FILE")
@@ -243,6 +296,73 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
             cluster_loss, cluster_preds = self.cluster_probe(code, None)
             cluster_preds = cluster_preds.argmax(1)
+
+            # ── Cluster Probe Debugging ──────────────────────────────────
+            if batch_idx == 0 and (self.current_epoch % 5 == 0 or self.current_epoch <= 2):
+                flat_cpreds = cluster_preds.reshape(-1).cpu()
+                flat_labels = label.reshape(-1).cpu()
+
+                # 1) Unique cluster IDs and pixel counts
+                unique_ids, counts = torch.unique(flat_cpreds, return_counts=True)
+                print("\n" + "=" * 70)
+                print(f"[CLUSTER PROBE DEBUG]  epoch={self.current_epoch}  "
+                      f"step={self.global_step}  n_classes={self.n_classes}  "
+                      f"extra_clusters={self.cfg.extra_clusters}")
+                print(f"  Total clusters in probe: "
+                      f"{self.n_classes + self.cfg.extra_clusters}")
+                print(f"  Unique cluster IDs found: {unique_ids.tolist()}")
+                print(f"  Pixel counts per cluster:")
+                for cid, cnt in zip(unique_ids.tolist(), counts.tolist()):
+                    pct = 100.0 * cnt / flat_cpreds.numel()
+                    print(f"    cluster {cid:>2d}: {cnt:>8d} pixels  ({pct:5.1f}%)")
+
+                # 2) Cross-tabulation: cluster_id × ground-truth label
+                valid = (flat_labels >= 0) & (flat_labels < self.n_classes)
+                if valid.any():
+                    vl = flat_labels[valid]
+                    vc = flat_cpreds[valid]
+                    n_total_clusters = self.n_classes + self.cfg.extra_clusters
+                    cross = torch.zeros(n_total_clusters, self.n_classes,
+                                        dtype=torch.int64)
+                    for c_id in range(n_total_clusters):
+                        mask_c = (vc == c_id)
+                        for l_id in range(self.n_classes):
+                            cross[c_id, l_id] = (mask_c & (vl == l_id)).sum()
+
+                    class_names = get_class_labels(self.cfg.dataset_name)[
+                                  :self.n_classes]
+                    header = "  cluster \\ label | " + " | ".join(
+                        f"{n:>12s}" for n in class_names)
+                    print(f"\n  Cross-tab (cluster × ground-truth):")
+                    print(f"  {header}")
+                    print(f"  {'-' * len(header)}")
+                    for c_id in range(n_total_clusters):
+                        row = " | ".join(
+                            f"{cross[c_id, l].item():>12d}"
+                            for l in range(self.n_classes))
+                        tag = " (extra)" if c_id >= self.n_classes else ""
+                        print(f"  cluster {c_id:>2d}{tag:>8s} | {row}")
+
+                    # 3) Per ground-truth class: dominant cluster
+                    print(f"\n  Per-class dominant cluster:")
+                    for l_id, name in enumerate(class_names):
+                        col = cross[:, l_id]
+                        total = col.sum().item()
+                        if total > 0:
+                            dom = col.argmax().item()
+                            dom_pct = 100.0 * col[dom].item() / total
+                            print(f"    {name:>15s}: dominant cluster={dom}  "
+                                  f"({dom_pct:.1f}% of {total} pixels)")
+                        else:
+                            print(f"    {name:>15s}: no pixels")
+
+                # 4) Cluster centroid norms (health check)
+                cnorms = self.cluster_probe.clusters.data.norm(dim=1).cpu()
+                print(f"\n  Cluster centroid norms: "
+                      f"{[f'{v:.3f}' for v in cnorms.tolist()]}")
+                print("=" * 70 + "\n")
+            # ── End Cluster Probe Debugging ───────────────────────────────
+
             self.cluster_metrics.update(cluster_preds, label)
 
             self.validation_step_outputs.append({
@@ -285,45 +405,59 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                     sns.heatmap(hist.t(), annot=False, fmt='g', ax=ax, cmap="Blues")
                     ax.set_xlabel('Predicted labels')
                     ax.set_ylabel('True labels')
-                    names = get_class_labels(self.cfg.dataset_name)
+                    # Use only the first n_classes labels, then add "Extra" if needed
+                    names = get_class_labels(self.cfg.dataset_name)[:self.n_classes]
                     if self.cfg.extra_clusters:
                         names = names + ["Extra"]
-                    ax.set_xticks(np.arange(0, len(names)) + .5)
-                    ax.set_yticks(np.arange(0, len(names)) + .5)
+                    # Derive tick count from actual histogram dimensions
+                    n_rows, n_cols = hist.shape
+                    ax.set_xticks(np.arange(0, n_rows) + .5)
+                    ax.set_yticks(np.arange(0, n_cols) + .5)
                     ax.xaxis.tick_top()
-                    ax.xaxis.set_ticklabels(names, fontsize=14)
-                    ax.yaxis.set_ticklabels(names, fontsize=14)
-                    colors = [self.label_cmap[i] / 255.0 for i in range(len(names))]
+                    # Truncate names to fit histogram dimensions
+                    row_names = names[:n_rows]
+                    col_names = names[:n_cols]
+                    ax.xaxis.set_ticklabels(row_names, fontsize=14)
+                    ax.yaxis.set_ticklabels(col_names, fontsize=14)
+                    colors = [self.label_cmap[i] / 255.0 if i < len(self.label_cmap)
+                              else np.array([0.5, 0.5, 0.5]) for i in range(max(n_rows, n_cols))]
                     [t.set_color(colors[i]) for i, t in enumerate(ax.xaxis.get_ticklabels())]
                     [t.set_color(colors[i]) for i, t in enumerate(ax.yaxis.get_ticklabels())]
                     plt.xticks(rotation=90)
                     plt.yticks(rotation=0)
-                    ax.vlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_xlim())
-                    ax.hlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_ylim())
+                    ax.vlines(np.arange(0, n_rows + 1), color=[.5, .5, .5], *ax.get_xlim())
+                    ax.hlines(np.arange(0, n_cols + 1), color=[.5, .5, .5], *ax.get_ylim())
                     plt.tight_layout()
                     add_plot([l.experiment for l in self.loggers], "conf_matrix", self.global_step)
 
+                    raw_hist = self.cluster_metrics.histogram.detach().cpu().to(torch.float32)
                     all_bars = torch.cat([
-                        self.cluster_metrics.histogram.sum(0).cpu(),
-                        self.cluster_metrics.histogram.sum(1).cpu()
+                        raw_hist.sum(0),
+                        raw_hist.sum(1)
                     ], axis=0)
                     ymin = max(all_bars.min() * .8, 1)
                     ymax = all_bars.max() * 1.2
 
                     fig, ax = plt.subplots(1, 2, figsize=(2 * 5, 1 * 4))
-                    ax[0].bar(range(self.n_classes + self.cfg.extra_clusters),
-                              self.cluster_metrics.histogram.sum(0).cpu(),
-                              tick_label=names,
-                              color=colors)
+                    bar_data_0 = raw_hist.sum(0)
+                    bar_names_0 = col_names[:len(bar_data_0)]
+                    bar_colors_0 = colors[:len(bar_data_0)]
+                    ax[0].bar(range(len(bar_data_0)),
+                              bar_data_0,
+                              tick_label=bar_names_0,
+                              color=bar_colors_0)
                     ax[0].set_ylim(ymin, ymax)
                     ax[0].set_title("Label Frequency")
                     ax[0].set_yscale('log')
                     ax[0].tick_params(axis='x', labelrotation=90)
 
-                    ax[1].bar(range(self.n_classes + self.cfg.extra_clusters),
-                              self.cluster_metrics.histogram.sum(1).cpu(),
-                              tick_label=names,
-                              color=colors)
+                    bar_data_1 = raw_hist.sum(1)
+                    bar_names_1 = row_names[:len(bar_data_1)]
+                    bar_colors_1 = colors[:len(bar_data_1)]
+                    ax[1].bar(range(len(bar_data_1)),
+                              bar_data_1,
+                              tick_label=bar_names_1,
+                              color=bar_colors_1)
                     ax[1].set_ylim(ymin, ymax)
                     ax[1].set_title("Cluster Frequency")
                     ax[1].set_yscale('log')
@@ -353,9 +487,24 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         net_optim = torch.optim.Adam(main_params, lr=self.cfg.lr)
         linear_probe_optim = torch.optim.Adam(list(self.linear_probe.parameters()), lr=5e-3)
-        cluster_probe_optim = torch.optim.Adam(list(self.cluster_probe.parameters()), lr=5e-3)
+        cluster_probe_optim = torch.optim.Adam(list(self.cluster_probe.parameters()), lr=5e-4)
 
-        return net_optim, linear_probe_optim, cluster_probe_optim
+        # Cosine annealing for the main network to prevent late-stage feature drift
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        net_scheduler = CosineAnnealingLR(net_optim, T_max=self.cfg.max_steps, eta_min=1e-6)
+
+        # Linear warmup for cluster probe: ramp from 0 → full LR over 500 steps
+        warmup_steps = 500
+        def warmup_fn(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            return 1.0
+        cluster_scheduler = LambdaLR(cluster_probe_optim, lr_lambda=warmup_fn)
+
+        return (
+            [net_optim, linear_probe_optim, cluster_probe_optim],
+            [net_scheduler, cluster_scheduler],
+        )
 
 
 @hydra.main(config_path="configs", config_name="train_config.yaml")
@@ -382,11 +531,12 @@ def my_app(cfg: DictConfig) -> None:
 
     geometric_transforms = T.Compose([
         T.RandomHorizontalFlip(),
-        T.RandomResizedCrop(size=cfg.res, scale=(0.8, 1.0))
+        T.RandomVerticalFlip(),
+        T.RandomRotation(degrees=15),
+        T.RandomResizedCrop(size=cfg.res, scale=(0.5, 1.0))
     ])
     photometric_transforms = T.Compose([
-        T.ColorJitter(brightness=.3, contrast=.3, saturation=.3, hue=.1),
-        T.RandomGrayscale(.2),
+        T.ColorJitter(brightness=.4, contrast=.4, saturation=.1, hue=0.0),
         T.RandomApply([T.GaussianBlur((5, 5))])
     ])
 
@@ -414,24 +564,24 @@ def my_app(cfg: DictConfig) -> None:
         val_loader_crop = "center"
 
     val_dataset = ContrastiveSegDataset(
-        pytorch_data_dir=pytorch_data_dir,
-        dataset_name=cfg.dataset_name,
-        crop_type=None,
-        image_set="val",
-        transform=get_transform(320, False, val_loader_crop),
-        target_transform=get_transform(320, True, val_loader_crop),
-        mask=True,
-        cfg=cfg,
+    pytorch_data_dir=pytorch_data_dir,
+    dataset_name=cfg.dataset_name,
+    crop_type=None,
+    image_set="val",
+    transform=get_transform(cfg.res, False, val_loader_crop),
+    target_transform=get_transform(cfg.res, True, val_loader_crop),
+    mask=True,
+    cfg=cfg,
     )
 
-    train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=True)
+    train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=False)
 
     if cfg.submitting_to_aml:
         val_batch_size = 16
     else:
         val_batch_size = cfg.batch_size
 
-    val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=False)
 
     model = LitUnsupervisedSegmenter(train_dataset.n_classes, cfg)
 
@@ -445,16 +595,17 @@ def my_app(cfg: DictConfig) -> None:
         save_dir=log_dir
     )
 
+    accelerator_type = 'gpu' if torch.cuda.is_available() else 'cpu'
     if cfg.submitting_to_aml:
-        gpu_args = dict(accelerator='cpu', devices=1, val_check_interval=250)
+        gpu_args = dict(accelerator=accelerator_type, devices=1, val_check_interval=250)
 
         if gpu_args["val_check_interval"] > len(train_loader):
             gpu_args.pop("val_check_interval")
 
     else:
-        gpu_args = dict(accelerator='cpu', devices=1, val_check_interval=cfg.val_freq)
+        gpu_args = dict(accelerator=accelerator_type, devices=1, val_check_interval=cfg.val_freq)
 
-        if gpu_args["val_check_interval"] > len(train_loader) // 4:
+        if gpu_args["val_check_interval"] > len(train_loader):
             gpu_args.pop("val_check_interval")
 
     trainer = Trainer(
@@ -466,7 +617,7 @@ def my_app(cfg: DictConfig) -> None:
                 dirpath=join(checkpoint_dir, name),
                 filename="checkpoint-{epoch:02d}-{step:04d}-mIoU={test/cluster/mIoU:.4f}",
                 every_n_train_steps=100,
-                save_top_k=1,
+                save_top_k=-1,
                 monitor="test/cluster/mIoU",
                 mode="max",
             )

@@ -81,22 +81,24 @@ def my_app(cfg: DictConfig) -> None:
 
     loader = DataLoader(dataset, n_images, shuffle=False, num_workers=0)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     load_iter = iter(loader)
     for i in range(1):
         next(load_iter)
     pack = next(load_iter)
-    pack = {k: v.cpu() for k, v in pack.items()}
+    pack = {k: v.to(device) for k, v in pack.items()}
     ind = pack["ind"]
     img = pack["img"]
 
-    net = CodeSpaceTable(continuous, n_images, dim, img.shape[2], img.shape[3]).cpu()
+    net = CodeSpaceTable(continuous, n_images, dim, img.shape[2], img.shape[3]).to(device)
     optim = torch.optim.Adam(list(net.parameters()), lr=1e-2)
 
-    loss_func = ContrastiveCRFLoss(cfg.crf_samples, cfg.alpha, cfg.beta, cfg.gamma, cfg.w1, cfg.w2, cfg.shift)
+    loss_func = ContrastiveCRFLoss(cfg.crf_samples, cfg.alpha, cfg.beta, cfg.gamma, cfg.w1, cfg.w2, cfg.shift).to(device)
 
     def to_normed_lab(img):
         img_t = rgb_to_lab(img)
-        img_t /= torch.tensor([100, 128 * 2, 128 * 2]).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).cpu()
+        img_t /= torch.tensor([100, 128 * 2, 128 * 2]).unsqueeze(0).unsqueeze(-1).unsqueeze(-1).to(device)
         return img_t
 
     for i in tqdm(range(cfg.epochs)):

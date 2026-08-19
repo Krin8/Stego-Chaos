@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader, Dataset
 from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot
 from tqdm import tqdm
 import random
-from data import create_chaos_colormap, ContrastiveSegDataset
+from data import create_chaos_colormap, ContrastiveSegDataset, CHAOS
 from scipy import ndimage
 
 try:
@@ -29,7 +29,7 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 def get_device():
     if torch.cuda.is_available():
-        return torch.device("cpu")
+        return torch.device("cuda")
     elif torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -90,11 +90,20 @@ class DicomImageFolder(Dataset):
 
     def __getitem__(self, index):
         dcm_path = self.dicom_paths[index]
-        image = self._load_dicom_as_pil(dcm_path)
-        seed = np.random.randint(2147483647)
-        random.seed(seed)
-        torch.manual_seed(seed)
-        image = self.transform(image)
+        
+        # Determine modality before pixel reading
+        dcm = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+        is_ct = hasattr(dcm, 'Modality') and dcm.Modality == 'CT'
+        
+        if is_ct:
+            image, _ = CHAOS._preprocess_ct_slice(dcm_path, None, self.transform, None, "CT")
+        else:
+            image = self._load_dicom_as_pil(dcm_path)
+            seed = np.random.randint(2147483647)
+            random.seed(seed)
+            torch.manual_seed(seed)
+            image = self.transform(image)
+            
         name = os.path.relpath(dcm_path, self.root).replace(os.sep, "_")
         return image, name
 

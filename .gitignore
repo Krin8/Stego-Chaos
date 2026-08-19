@@ -15,3 +15,4 @@ src/.DS_Storesrc/preprocessed/
 src/runs/
 archive/
 *.npz
+src/BiomedCLIP*/

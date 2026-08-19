@@ -100,9 +100,10 @@ def my_app(cfg: DictConfig) -> None:
             collate_fn=flexible_collate
         )
 
-        model.eval().cpu()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.eval().to(device)
 
-        par_model = torch.nn.DataParallel(model.net) if cfg.use_ddp else model.net
+        par_model = torch.nn.DataParallel(model.net) if (cfg.use_ddp and torch.cuda.is_available()) else model.net
 
         saved_data = defaultdict(list)
 
@@ -110,8 +111,8 @@ def my_app(cfg: DictConfig) -> None:
             for i, batch in enumerate(tqdm(test_loader)):
 
                 with torch.no_grad():
-                    img = batch["img"].cpu()
-                    label = batch["label"].cpu()
+                    img = batch["img"].to(device)
+                    label = batch["label"].to(device)
 
                     # CHAOS-style forward (from Code 1)
                     feats, code1 = par_model(img)

@@ -33,11 +33,11 @@ from tqdm.auto import tqdm
 # CONFIGURATION
 # ===========================================================================
 
-DATA_ROOT = os.path.join(os.path.dirname(__file__),
+DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                          "pytorch_data_dir", "archive",
                          "CHAOS_Train_Sets", "Train_Sets")
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__),
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                           "preprocessed")
 
 VAL_FRACTION = 0.2   # 80/20 patient-level split
@@ -198,12 +198,12 @@ def process_full_dataset():
     """Process the entire CHAOS dataset and save into preprocessed/ with
     an 80/20 patient-level train/val split.
     """
-    print(f"📂 Scanning {DATA_ROOT} ...")
+    print(f"Scanning {DATA_ROOT} ...")
     all_samples = collect_samples(DATA_ROOT)
     print(f"   Found {len(all_samples)} total slices")
 
     if not all_samples:
-        print("❌ ERROR: No samples found. Check DATA_ROOT path.")
+        print("ERROR: No samples found. Check DATA_ROOT path.")
         return
 
     # --- Patient-level split (per modality group) ---
@@ -218,10 +218,10 @@ def process_full_dataset():
     val_ct = pick_val(ct_patients)
     val_mr = pick_val(mr_patients)
 
-    print(f"   CT patients:  {len(ct_patients)} total → "
+    print(f"   CT patients:  {len(ct_patients)} total -> "
           f"{len(ct_patients) - len(val_ct)} train / {len(val_ct)} val  "
           f"(val: {sorted(val_ct)})")
-    print(f"   MR patients:  {len(mr_patients)} total → "
+    print(f"   MR patients:  {len(mr_patients)} total -> "
           f"{len(mr_patients) - len(val_mr)} train / {len(val_mr)} val  "
           f"(val: {sorted(val_mr)})")
 
@@ -254,7 +254,7 @@ def process_full_dataset():
             else:
                 img = preprocess_mri_slice(dcm_path)
         except Exception as e:
-            tqdm.write(f"  ⚠️ SKIP {dcm_path}: {e}")
+            tqdm.write(f"  SKIP {dcm_path}: {e}")
             stats[split]["skipped"] += 1
             continue
 
@@ -275,12 +275,12 @@ def process_full_dataset():
 
     # --- Summary ---
     print("\n" + "=" * 60)
-    print("  ✅ PREPROCESSING COMPLETE")
+    print("  PREPROCESSING COMPLETE")
     print("=" * 60)
     print(f"  Output: {OUTPUT_DIR}")
     print(f"  Pipeline:")
-    print(f"    CT:  HU → Window [-150,250] → Rescale [0,255] → CLAHE")
-    print(f"    MR:  Percentile Norm (1-99%) → N4 Bias Correction → Rescale [0,255] → CLAHE")
+    print(f"    CT:  HU -> Window [-150,250] -> Rescale [0,255] -> CLAHE")
+    print(f"    MR:  Percentile Norm (1-99%) -> N4 Bias Correction -> Rescale [0,255] -> CLAHE")
     print(f"    Labels: Saved as-is (no spatial transforms)")
     for split in ("train", "val"):
         s = stats[split]

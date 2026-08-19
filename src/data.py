@@ -99,7 +99,7 @@ class CHAOS(Dataset):
     MODALITIES = ("CT", "T1DUAL", "T2SPIR")
 
     def __init__(self, root, modality, image_set, transform, target_transform,
-                 n_classes=5, use_preprocessed=False):
+                 n_classes=5, use_preprocessed_data=False):
         super().__init__()
         assert modality in (*self.MODALITIES, "all"), \
             f"modality must be one of {self.MODALITIES + ('all',)}"
@@ -110,52 +110,37 @@ class CHAOS(Dataset):
         self.transform        = transform
         self.target_transform = target_transform
         self.n_classes        = n_classes
-        self.use_preprocessed = use_preprocessed
+        self.root             = root
+        self.use_preprocessed_data = use_preprocessed_data
 
         # Root of the actual CHAOS train data (verified path)
         self.train_root = join(root, "archive", "CHAOS_Train_Sets", "Train_Sets")
-        self.preprocessed_root = join(os.path.dirname(__file__), "preprocessed")
 
         # Each entry: (dcm_path, mask_path_or_None, modality_tag, patient_id)
         self.samples: list = []
-        self._collect_samples()
+        if self.use_preprocessed_data:
+            self._collect_preprocessed_samples()
+        else:
+            self._collect_samples()
 
-        # Patient-level 80/20 split — all slices of a patient stay together
-        # so there is no cross-patient leakage between train and val.
-        if image_set != "all" and not self.use_preprocessed:
-            all_patients = sorted(set(s[3] for s in self.samples))
-            n_val = max(1, int(0.2 * len(all_patients)))
-            val_patients = set(all_patients[-n_val:])
-            if image_set == "val":
-                self.samples = [s for s in self.samples if s[3] in val_patients]
-            else:
-                self.samples = [s for s in self.samples if s[3] not in val_patients]
+            # Patient-level 80/20 split — all slices of a patient stay together
+            # so there is no cross-patient leakage between train and val.
+            if image_set != "all":
+                all_patients = sorted(set(s[3] for s in self.samples))
+                n_val = max(1, int(0.2 * len(all_patients)))
+                val_patients = set(all_patients[-n_val:])
+                if image_set == "val":
+                    self.samples = [s for s in self.samples if s[3] in val_patients]
+                else:
+                    self.samples = [s for s in self.samples if s[3] not in val_patients]
 
     # ------------------------------------------------------------------
     # Sample collection — exact paths from screenshots
     # ------------------------------------------------------------------
 
     def _collect_samples(self):
-        mods_wanted = self.MODALITIES if self.modality == "all" else (self.modality,)
-
-        if self.use_preprocessed:
-            image_sets = ["train", "val"] if self.image_set == "all" else [self.image_set]
-            for iset in image_sets:
-                images_dir = join(self.preprocessed_root, iset, "images")
-                labels_dir = join(self.preprocessed_root, iset, "labels")
-                if not os.path.isdir(images_dir):
-                    continue
-                img_files = sorted(f for f in os.listdir(images_dir) if f.endswith(".png"))
-                for img_f in img_files:
-                    if not img_f.startswith(tuple(mods_wanted)):
-                        continue
-                    img_path = join(images_dir, img_f)
-                    lbl_path = join(labels_dir, img_f)
-                    if not os.path.exists(lbl_path):
-                        lbl_path = None
-                    mod = img_f.split("_")[0]
-                    self.samples.append((img_path, lbl_path, mod, img_f))
-            return
+        mods_wanted = self.MODALITIES if self.modality == "all" \
+                      else (self.modality,)
 
         if "CT" in mods_wanted:
             ct_root = join(self.train_root, "CT")
@@ -230,11 +215,128 @@ class CHAOS(Dataset):
     def _load_dicom_as_pil(dcm_path: str) -> Image.Image:
         dcm = pydicom.dcmread(dcm_path)
         arr = dcm.pixel_array.astype(np.float32)
-        arr -= arr.min()
-        if arr.max() > 0:
-            arr /= arr.max()
+        
+        # Rescale to Hounsfield Units (HU) if metadata exists
+        intercept = getattr(dcm, 'RescaleIntercept', 0)
+        slope = getattr(dcm, 'RescaleSlope', 1)
+        arr = arr * slope + intercept
+
+        # Standard Abdominal Window (Level = 40, Width = 400)
+        # This highlights the liver, kidneys, and spleen while ignoring bone/air
+        W_level = 40
+        W_width = 400
+        lower_bound = W_level - (W_width / 2)
+        upper_bound = W_level + (W_width / 2)
+        
+        # Clip and normalize based on the fixed window
+        arr = np.clip(arr, lower_bound, upper_bound)
+        arr = (arr - lower_bound) / (upper_bound - lower_bound)
+        
         arr = (arr * 255).astype(np.uint8)
         return Image.fromarray(arr).convert("RGB")
+
+    @staticmethod
+    def _preprocess_ct_slice(dcm_path: str, mask_path: str, transform, target_transform, modality: str) -> tuple:
+        import SimpleITK as sitk
+        import cv2
+
+        # 1. LOAD (Internal PNG Conversion)
+        sitk_img = sitk.ReadImage(dcm_path)
+        img_array = sitk.GetArrayFromImage(sitk_img).astype(np.float32)
+        hu_data = img_array[0]  # Shape: (H, W)
+
+        # 2. RESAMPLE (Standardize to 1.0mm)
+        original_spacing = sitk_img.GetSpacing()
+        new_size_x = int(round(sitk_img.GetSize()[0] * (original_spacing[0] / 1.0)))
+        new_size_y = int(round(sitk_img.GetSize()[1] * (original_spacing[1] / 1.0)))
+        resampled_img = cv2.resize(hu_data, (new_size_x, new_size_y), interpolation=cv2.INTER_LINEAR)
+
+        has_mask = mask_path is not None and os.path.exists(mask_path)
+        if has_mask:
+            # Load and map mask first using static method _load_mask
+            mask_pil = CHAOS._load_mask(mask_path, modality)
+            mask_raw = np.array(mask_pil)
+            resampled_mask = cv2.resize(mask_raw, (new_size_x, new_size_y), interpolation=cv2.INTER_NEAREST)
+        else:
+            resampled_mask = None
+
+        # 3. CROP (Body Mask ROI)
+        mask_for_crop = (resampled_img > -500).astype(np.uint8)
+        coords = cv2.findNonZero(mask_for_crop)
+        if coords is not None:
+            x, y, w, h = cv2.boundingRect(coords)
+            cropped_img = resampled_img[y:y+h, x:x+w]
+            if has_mask:
+                cropped_mask = resampled_mask[y:y+h, x:x+w]
+        else:
+            cropped_img = resampled_img
+            if has_mask:
+                cropped_mask = resampled_mask
+
+        # 4. WINDOW (Soft Tissue [-150, 250])
+        windowed = np.clip(cropped_img, -150, 250)
+
+        # 5. NORMALIZE (0 to 1)
+        normalized = (windowed - (-150)) / (250 - (-150))
+        normalized = np.clip(normalized, 0, 1)
+
+        # 6. SPATIAL STANDARDIZATION (Padding)
+        h, w = normalized.shape
+        max_dim = max(h, w)
+        pad_h = (max_dim - h) // 2
+        pad_w = (max_dim - w) // 2
+
+        padded_img = np.pad(
+            normalized,
+            ((pad_h, max_dim - h - pad_h), (pad_w, max_dim - w - pad_w)),
+            mode='constant',
+            constant_values=0
+        )
+
+        if has_mask:
+            padded_mask = np.pad(
+                cropped_mask,
+                ((pad_h, max_dim - h - pad_h), (pad_w, max_dim - w - pad_w)),
+                mode='constant',
+                constant_values=255
+            )
+        else:
+            padded_mask = None
+
+        # 7. RESIZE to target_res dynamically extracted from transform
+        target_res = 224
+        from torchvision.transforms import Resize
+        if hasattr(transform, "transforms"):
+            for t in transform.transforms:
+                if isinstance(t, Resize):
+                    target_res = t.size
+                    if isinstance(target_res, (list, tuple)):
+                        target_res = target_res[0]
+                    break
+
+        final_img_2d = cv2.resize(padded_img, (target_res, target_res), interpolation=cv2.INTER_AREA)
+        if has_mask:
+            final_mask_2d = cv2.resize(padded_mask, (target_res, target_res), interpolation=cv2.INTER_NEAREST)
+        else:
+            final_mask_2d = None
+
+        # Convert image back to PIL (0-255 uint8)
+        final_img_8bit = (final_img_2d * 255).astype(np.uint8)
+        img_pil = Image.fromarray(final_img_8bit).convert("RGB")
+
+        seed = np.random.randint(2147483647)
+        random.seed(seed); torch.manual_seed(seed)
+        img_tensor = transform(img_pil)
+
+        if has_mask:
+            mask_pil = Image.fromarray(final_mask_2d, mode="L")
+            random.seed(seed); torch.manual_seed(seed)
+            label_tensor = target_transform(mask_pil).squeeze(0).long()
+            label_tensor[label_tensor == 255] = -1
+        else:
+            label_tensor = torch.full((target_res, target_res), -1, dtype=torch.long)
+
+        return img_tensor, label_tensor
 
     # ------------------------------------------------------------------
     # Ground PNG → uint8 class-index PIL Image (mode "L")
@@ -251,6 +353,43 @@ class CHAOS(Dataset):
             label[raw == px] = cls
         return Image.fromarray(label, mode="L")
 
+    def _collect_preprocessed_samples(self):
+        parent_dir = os.path.dirname(os.path.abspath(self.root))
+        preprocessed_root = join(parent_dir, "preprocessed")
+        if not os.path.isdir(preprocessed_root):
+            preprocessed_root = join(self.root, "preprocessed")
+            
+        if self.image_set == "all":
+            splits = ["train", "val"]
+        else:
+            splits = [self.image_set]
+            
+        mods_wanted = self.MODALITIES if self.modality == "all" else (self.modality,)
+        
+        for split in splits:
+            split_dir = join(preprocessed_root, split)
+            img_dir = join(split_dir, "images")
+            label_dir = join(split_dir, "labels")
+            
+            if not os.path.isdir(img_dir):
+                continue
+                
+            for fname in sorted(os.listdir(img_dir)):
+                if not fname.lower().endswith(".png"):
+                    continue
+                parts = fname.split("_")
+                if len(parts) < 3:
+                    continue
+                mod = parts[0]
+                pid = parts[1]
+                
+                if mod in mods_wanted:
+                    img_path = join(img_dir, fname)
+                    mask_path = join(label_dir, fname)
+                    if not os.path.exists(mask_path):
+                        mask_path = None
+                    self.samples.append((img_path, mask_path, mod, pid))
+
     # ------------------------------------------------------------------
     # Dataset interface
     # ------------------------------------------------------------------
@@ -259,27 +398,48 @@ class CHAOS(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
+        if self.use_preprocessed_data:
+            img_path, mask_path, mod, _ = self.samples[index]
+            img = Image.open(img_path).convert("RGB")
+
+            seed = np.random.randint(2147483647)
+            random.seed(seed); torch.manual_seed(seed)
+            img = self.transform(img)
+
+            if mask_path is not None and os.path.exists(mask_path):
+                mask_pil = self._load_mask(mask_path, mod)
+                random.seed(seed); torch.manual_seed(seed)
+                label = self.target_transform(mask_pil).squeeze(0).long()
+                label[label == 255] = -1
+            else:
+                label = torch.full(img.shape[1:], -1, dtype=torch.long)
+
+            img_sum = img.sum(0)
+            valid_mask = (img_sum > (img_sum.min() + 0.01)).float()
+            return img, label, valid_mask
+
         dcm_path, mask_path, mod, _ = self.samples[index]
 
-        if self.use_preprocessed:
-            img = Image.open(dcm_path).convert("RGB")
+        if mod == "CT":
+            img, label = self._preprocess_ct_slice(dcm_path, mask_path, self.transform, self.target_transform, mod)
         else:
             img = self._load_dicom_as_pil(dcm_path)
 
-        seed = np.random.randint(2147483647)
+            seed = np.random.randint(2147483647)
 
-        random.seed(seed); torch.manual_seed(seed)
-        img = self.transform(img)                            # [3, H, W]
-
-        if mask_path is not None and os.path.exists(mask_path):
-            mask_pil = self._load_mask(mask_path, mod)
             random.seed(seed); torch.manual_seed(seed)
-            label = self.target_transform(mask_pil).squeeze(0).long()  # [H, W]
-            label[label == 255] = -1                         # restore ignore sentinel
-        else:
-            label = torch.full(img.shape[1:], -1, dtype=torch.long)
+            img = self.transform(img)                            # [3, H, W]
 
-        valid_mask = (label >= 0).float()
+            if mask_path is not None and os.path.exists(mask_path):
+                mask_pil = self._load_mask(mask_path, mod)
+                random.seed(seed); torch.manual_seed(seed)
+                label = self.target_transform(mask_pil).squeeze(0).long()  # [H, W]
+                label[label == 255] = -1                         # restore ignore sentinel
+            else:
+                label = torch.full(img.shape[1:], -1, dtype=torch.long)
+
+        img_sum = img.sum(0)
+        valid_mask = (img_sum > (img_sum.min() + 0.01)).float()
         return img, label, valid_mask
 
 
@@ -316,88 +476,66 @@ class MaterializedDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 class ContrastiveSegDataset(Dataset):
-    def __init__(self,
-                 pytorch_data_dir,
-                 dataset_name,
-                 crop_type,
-                 image_set,
-                 transform,
-                 target_transform,
-                 cfg,
-                 aug_geometric_transform=None,
-                 aug_photometric_transform=None,
-                 num_neighbors=5,
-                 compute_knns=False,
-                 mask=False,
-                 pos_labels=False,
-                 pos_images=False,
-                 extra_transform=None,
-                 model_type_override=None
-                 ):
-        super(ContrastiveSegDataset).__init__()
 
-        self.num_neighbors = num_neighbors
-        self.image_set = image_set
-        self.dataset_name = dataset_name
-        self.mask = mask
-        self.pos_labels = pos_labels
-        self.pos_images = pos_images
-        self.extra_transform = extra_transform
+    def __init__(
+        self,
+        pytorch_data_dir,
+        dataset_name,
+        crop_type,              # ignored — kept for API compatibility
+        image_set,
+        transform,
+        target_transform,
+        cfg,
+        aug_geometric_transform=None,
+        aug_photometric_transform=None,
+        mask=False,
+        extra_transform=None,
+        model_type_override=None,
+        num_neighbors=None,
+        pos_images=False,
+        pos_labels=False,
+    ):
+        super().__init__()
 
-        if dataset_name == "chaos":
-            self.n_classes = getattr(cfg, "chaos_n_classes", 5)
-            dataset_class = CHAOS
-            extra_args = dict(
-                modality=getattr(cfg, "chaos_modality", "all"),
-                n_classes=self.n_classes,
-                use_preprocessed=getattr(cfg, "use_preprocessed_data", False)
-            )
-        else:
-            raise ValueError("Unknown dataset: {}".format(dataset_name))
+        # assert dataset_name == "chaos", \
+        #     f"This datasets.py only supports dataset_name='chaos', got '{dataset_name}'"
 
-        self.aug_geometric_transform = aug_geometric_transform
+        self.mask                      = mask
+        self.extra_transform           = extra_transform
         self.aug_photometric_transform = aug_photometric_transform
+        self.pos_images                = pos_images
+        self.pos_labels                = pos_labels
 
-        self.dataset = dataset_class(
-            root=pytorch_data_dir,
-            image_set=self.image_set,
-            transform=transform,
-            target_transform=target_transform,
-            **extra_args
+        modality  = getattr(cfg, "chaos_modality",  "all")
+        n_classes = getattr(cfg, "chaos_n_classes", 5)
+        use_preprocessed_data = getattr(cfg, "use_preprocessed_data", False)
+        self.n_classes = n_classes
+
+        self.dataset = CHAOS(
+            root             = pytorch_data_dir,
+            modality         = modality,
+            image_set        = image_set,
+            transform        = transform,
+            target_transform = target_transform,
+            n_classes        = n_classes,
+            use_preprocessed_data = use_preprocessed_data,
         )
 
-        if model_type_override is not None:
-            model_type = model_type_override
-        else:
-            model_type = cfg.model_type
-
-        nice_dataset_name = dataset_name
-        if getattr(cfg, "use_preprocessed_data", False):
-            nice_dataset_name += "_preprocessed"
-        feature_cache_file = join(
-            pytorch_data_dir,
-            "nns",
-            "nns_{}_{}_{}_{}_{}.npz".format(
-                model_type,
-                nice_dataset_name,
-                image_set,
-                crop_type,
-                cfg.res
-            )
-        )
-
-        if pos_labels or pos_images:
-            if not os.path.exists(feature_cache_file) or compute_knns:
-                raise ValueError(
-                    "could not find nn file {} please run precompute_knns".format(
-                        feature_cache_file
-                    )
-                )
-            else:
-                loaded = np.load(feature_cache_file)
-                self.nns = loaded["nns"]
-
-            assert len(self.dataset) == self.nns.shape[0]
+        # Build patient → indices map for positive pair sampling
+        self._patient_to_indices = {}
+        for idx, sample in enumerate(self.dataset.samples):
+            pid = sample[3]  # patient_id
+            if pid not in self._patient_to_indices:
+                self._patient_to_indices[pid] = []
+            self._patient_to_indices[pid].append(idx)
+        # Pre-compute per-index lists for O(1) lookup
+        self._pos_candidates = []
+        for idx, sample in enumerate(self.dataset.samples):
+            pid = sample[3]
+            siblings = [i for i in self._patient_to_indices[pid] if i != idx]
+            if len(siblings) == 0:
+                siblings = [idx]  # fallback: use self if only one slice
+            self._pos_candidates.append(siblings)
 
     def __len__(self):
         return len(self.dataset)
@@ -407,68 +545,45 @@ class ContrastiveSegDataset(Dataset):
         torch.manual_seed(seed)
 
     def __getitem__(self, ind):
-
-        pack = self.dataset[ind]
-
-        if self.pos_images or self.pos_labels:
-            ind_pos = self.nns[ind][
-                torch.randint(
-                    low=1,
-                    high=self.num_neighbors + 1,
-                    size=[]
-                ).item()
-            ]
-
-            pack_pos = self.dataset[ind_pos]
+        pack = self.dataset[ind]   # (img, label, valid_mask)
 
         seed = np.random.randint(2147483647)
-
         self._set_seed(seed)
 
-        coord_entries = torch.meshgrid(
-            [
-                torch.linspace(-1, 1, pack[0].shape[1]),
-                torch.linspace(-1, 1, pack[0].shape[2])
-            ]
-        )
-
-        coord = torch.cat(
-            [t.unsqueeze(0) for t in coord_entries],
-            0
-        )
-
-        if self.extra_transform is not None:
-            extra_trans = self.extra_transform
+        # Sample a positive pair: different slice from the same patient
+        if self.pos_images:
+            pos_idx = random.choice(self._pos_candidates[ind])
+            pos_pack = self.dataset[pos_idx]
         else:
-            extra_trans = lambda i, x: x
+            pos_pack = pack
+
+        # Spatial coordinate grid — used by some EAGLE loss terms
+        coord_entries = torch.meshgrid(
+            [torch.linspace(-1, 1, pack[0].shape[1]),
+             torch.linspace(-1, 1, pack[0].shape[2])],
+            indexing="ij"
+        )
+        coord = torch.cat([t.unsqueeze(-1) for t in coord_entries], -1)
+
+        extra = self.extra_transform \
+                if self.extra_transform is not None else lambda i, x: x
 
         ret = {
-            "ind": ind,
-            "img": extra_trans(ind, pack[0]),
-            "label": extra_trans(ind, pack[1]),
+            "ind":       ind,
+            "img":       extra(ind, pack[0]),
+            "label":     extra(ind, pack[1]),
+            "img_pos":   extra(ind, pos_pack[0]),
+            "label_pos": extra(ind, pos_pack[1]),
+            "img_aug":   extra(ind, pack[0]),
+            "coord_aug": coord,
+            "coord":     coord,
         }
-
-        if self.pos_images:
-            ret["img_pos"] = extra_trans(ind, pack_pos[0])
-            ret["ind_pos"] = ind_pos
 
         if self.mask:
             ret["mask"] = pack[2]
-
-        if self.pos_labels:
-            ret["label_pos"] = extra_trans(ind, pack_pos[1])
-            ret["mask_pos"] = pack_pos[2]
+            ret["mask_pos"] = pos_pack[2]
 
         if self.aug_photometric_transform is not None:
-            img_aug = self.aug_photometric_transform(
-                self.aug_geometric_transform(pack[0])
-            )
-
-            self._set_seed(seed)
-
-            coord_aug = self.aug_geometric_transform(coord)
-
-            ret["img_aug"] = img_aug
-            ret["coord_aug"] = coord_aug.permute(1, 2, 0)
+            ret["img_pos_aug"] = self.aug_photometric_transform(ret["img_pos"])
 
         return ret

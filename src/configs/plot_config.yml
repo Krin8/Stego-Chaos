@@ -15,18 +15,18 @@ num_neighbors: 7
 
 batch_size: 16
 dataset_name: "cocostuff27"
-crop_type: ~
-crop_ratio: .5
-res: 224
+crop_type: "five"
+crop_ratio: .75
+res: 320
 loader_crop_type: "center"
 
 # Model Params
-extra_clusters: 0
+extra_clusters: 3
 use_true_labels: False
 use_recalibrator: False
-model_type: "vit_small"
+model_type: "vit_base"
 arch: "dino"
-use_fit_model: False
+use_fit_model: True
 dino_feat_type: "feat"
 projection_type: "nonlinear"
 dino_patch_size: 8
@@ -38,6 +38,7 @@ zero_clamp: True
 
 
 lr: 5e-4
+backbone_lr: 1e-6
 pretrained_weights: ~
 use_salience: False
 stabalize: False

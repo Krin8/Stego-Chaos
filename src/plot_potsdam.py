@@ -33,10 +33,14 @@ def my_app(cfg: DictConfig) -> None:
                              shuffle=False, num_workers=cfg.num_workers,
                              pin_memory=True, collate_fn=flexible_collate)
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = LitUnsupervisedSegmenter.load_from_checkpoint("../saved_models/potsdam_test.ckpt")
     print(OmegaConf.to_yaml(model.cfg))
-    model.eval().cpu()
-    par_model = torch.nn.DataParallel(model.net)
+    model.eval().to(device)
+    if torch.cuda.is_available():
+        par_model = torch.nn.DataParallel(model.net)
+    else:
+        par_model = model.net
 
     outputs = defaultdict(list)
     for i, batch in enumerate(tqdm(test_loader)):
@@ -44,8 +48,8 @@ def my_app(cfg: DictConfig) -> None:
             if i > 100:
                 break
 
-            img = batch["img"].cpu()
-            label = batch["label"].cpu()
+            img = batch["img"].to(device)
+            label = batch["label"].to(device)
             feats, code1 = par_model(img)
             feats, code2 = par_model(img.flip(dims=[3]))
             code = (code1 + code2.flip(dims=[3])) / 2
