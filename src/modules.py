@@ -506,6 +506,7 @@ class ContrastiveCorrelationLoss(nn.Module):
                 orig_feats: torch.Tensor, orig_feats_pos: torch.Tensor,
                 orig_salience: torch.Tensor, orig_salience_pos: torch.Tensor,
                 orig_code: torch.Tensor, orig_code_pos: torch.Tensor,
+                neg_feats: torch.Tensor, neg_code: torch.Tensor,
                 ):
 
         coord_shape = [orig_feats.shape[0], self.cfg.feature_samples, self.cfg.feature_samples, 2]
@@ -535,12 +536,31 @@ class ContrastiveCorrelationLoss(nn.Module):
 
         neg_losses = []
         neg_cds = []
-        for i in range(self.cfg.neg_samples):
-            perm_neg = super_perm(orig_feats.shape[0], orig_feats.device)
-            feats_neg = sample(orig_feats[perm_neg], coords2)
-            code_neg = sample(orig_code[perm_neg], coords2)
+        
+        # Synchronize batch sizes (CombinedLoader might yield mismatched sizes at the end of an epoch)
+        min_batch = min(feats.shape[0], neg_feats.shape[0])
+        
+        feats_for_neg = feats[:min_batch]
+        code_for_neg = code[:min_batch]
+        coords2_neg = coords2[:min_batch]
+        
+        neg_feats_matched = neg_feats[:min_batch]
+        neg_code_matched = neg_code[:min_batch]
+        
+        # Ensure we don't try to take more samples than we have in the negative batch
+        num_neg = min(self.cfg.neg_samples, min_batch)
+        
+        for i in range(num_neg):
+            # Roll the negative batch to get different negative images for each sample in the batch
+            rolled_neg_feats = torch.roll(neg_feats_matched, shifts=i, dims=0)
+            rolled_neg_code = torch.roll(neg_code_matched, shifts=i, dims=0)
+            
+            # Sample patches from the negative images using the same coords
+            feats_neg_sampled = sample(rolled_neg_feats, coords2_neg)
+            code_neg_sampled = sample(rolled_neg_code, coords2_neg)
+            
             neg_inter_loss, neg_inter_cd = self.helper(
-                feats, feats_neg, code, code_neg, self.cfg.neg_inter_shift)
+                feats_for_neg, feats_neg_sampled, code_for_neg, code_neg_sampled, self.cfg.neg_inter_shift)
             neg_losses.append(neg_inter_loss)
             neg_cds.append(neg_inter_cd)
         neg_inter_loss = torch.cat(neg_losses, axis=0)

@@ -152,18 +152,25 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         linear_probe_optim.zero_grad()
         cluster_probe_optim.zero_grad()
 
+        # Unpack the CombinedLoader batches
+        main_batch = batch["main"]
+        neg_batch = batch["neg"]
+
         with torch.no_grad():
-            ind = batch["ind"]
-            img = batch["img"]
-            img_aug = batch["img_aug"]
-            coord_aug = batch["coord_aug"]
-            img_pos = batch["img_pos"]
-            label = batch["label"]
-            label_pos = batch["label_pos"]
+            ind = main_batch["ind"]
+            img = main_batch["img"]
+            img_aug = main_batch["img_aug"]
+            coord_aug = main_batch["coord_aug"]
+            img_pos = main_batch["img_pos"]
+            label = main_batch["label"]
+            label_pos = main_batch["label_pos"]
+            
+            neg_img = neg_batch["img"]
 
         feats, code = self.net(img)
         if self.cfg.correspondence_weight > 0:
             feats_pos, code_pos = self.net(img_pos)
+            neg_feats, neg_code = self.net(neg_img)
         log_args = dict(sync_dist=False, rank_zero_only=True)
 
         if self.cfg.use_true_labels:
@@ -179,8 +186,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                           (self.global_step % self.cfg.hist_freq == 0) and \
                           (self.global_step > 0)
         if self.cfg.use_salience:
-            salience = batch["mask"].to(torch.float32).squeeze(1)
-            salience_pos = batch["mask_pos"].to(torch.float32).squeeze(1)
+            salience = main_batch["mask"].to(torch.float32).squeeze(1)
+            salience_pos = main_batch["mask_pos"].to(torch.float32).squeeze(1)
         else:
             salience = None
             salience_pos = None
@@ -194,6 +201,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                 signal, signal_pos,
                 salience, salience_pos,
                 code, code_pos,
+                neg_feats, neg_code,
             )
 
             if should_log_hist:
@@ -596,6 +604,16 @@ def my_app(cfg: DictConfig) -> None:
 
     train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=False)
 
+    neg_dataset = NegativeImageDataset(
+        root_dir="/Users/navneetbavineni/Downloads/Paired MRI (T1, T2) and CT Scans Dataset",
+        transform=get_transform(cfg.res, False, cfg.loader_crop_type)
+    )
+    # Use drop_last=True so that we don't crash if the batch sizes don't perfectly align
+    neg_loader = DataLoader(neg_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, drop_last=True, pin_memory=False)
+
+    # PyTorch Lightning natively handles dicts of dataloaders for multiple dataloaders
+    combined_train_loader = {"main": train_loader, "neg": neg_loader}
+
     if cfg.submitting_to_aml:
         val_batch_size = 16
     else:
@@ -644,7 +662,7 @@ def my_app(cfg: DictConfig) -> None:
         ],
         **gpu_args
     )
-    trainer.fit(model, train_loader, val_loader)
+    trainer.fit(model, combined_train_loader, val_loader)
 
 
 if __name__ == "__main__":

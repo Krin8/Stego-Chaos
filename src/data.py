@@ -598,7 +598,7 @@ class NegativeImageDataset(Dataset):
         self.image_paths = []
         for root, dirs, files in os.walk(root_dir):
             for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                if file.lower().endswith(('.dcm')):
                     self.image_paths.append(os.path.join(root, file))
         # Sort or shuffle if necessary, but dataloader shuffle will handle randomizing batches
         self.image_paths = sorted(self.image_paths)
@@ -608,8 +608,8 @@ class NegativeImageDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        # Load as RGB to match typical pipeline
-        img = Image.open(img_path).convert("RGB")
+        # Load using CHAOS dicom loader to preserve domain statistics (Hounsfield windowing)
+        img = CHAOS._load_dicom_as_pil(img_path)
         if self.transform:
             img = self.transform(img)
         # We don't have labels or masks, just return the image
