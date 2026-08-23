@@ -309,7 +309,7 @@ class ClusterLookup(nn.Module):
         # Marginal entropy maximization to prevent collapse
         avg_probs = cluster_probs.mean(dim=(0, 2, 3))
         entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
-        cluster_loss -= 0.5 * entropy
+        cluster_loss -= 1.5 * entropy
 
         if log_probs:
             return nn.functional.log_softmax(inner_products * alpha, dim=1)

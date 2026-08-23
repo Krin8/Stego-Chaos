@@ -587,3 +587,30 @@ class ContrastiveSegDataset(Dataset):
             ret["img_pos_aug"] = self.aug_photometric_transform(ret["img_pos"])
 
         return ret
+class NegativeImageDataset(Dataset):
+    """
+    A simple dataset to load images from a directory recursively.
+    Used to supply completely different "negative" images to the contrastive loss.
+    """
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = []
+        for root, dirs, files in os.walk(root_dir):
+            for file in files:
+                if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    self.image_paths.append(os.path.join(root, file))
+        # Sort or shuffle if necessary, but dataloader shuffle will handle randomizing batches
+        self.image_paths = sorted(self.image_paths)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        # Load as RGB to match typical pipeline
+        img = Image.open(img_path).convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        # We don't have labels or masks, just return the image
+        return {"img": img}

@@ -75,8 +75,10 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         else:
             self.text_embeddings = None
 
-        self.train_cluster_probe = ClusterLookup(dim, n_classes)
-        self.cluster_probe = ClusterLookup(dim, n_classes + cfg.extra_clusters)
+        # Cluster probes take dim+2 to include (x,y) spatial coordinates
+        self.spatial_weight = getattr(cfg, 'spatial_weight', 5.0)
+        self.train_cluster_probe = ClusterLookup(dim + 2, n_classes)
+        self.cluster_probe = ClusterLookup(dim + 2, n_classes + cfg.extra_clusters)
         
         if self.text_embeddings is not None:
             self.train_cluster_probe.init_from(self.text_embeddings)
@@ -120,6 +122,22 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         self.val_steps = 0
         self.save_hyperparameters()
+
+    def _add_spatial_coords(self, code):
+        """Concatenate weighted (x, y) coordinate channels to feature code.
+        
+        This gives the cluster probe spatial awareness — critical for medical
+        imaging where organs are distinguished by position, not appearance.
+        """
+        B, C, H, W = code.shape
+        coords_h = torch.linspace(-1, 1, H, device=code.device, dtype=code.dtype)
+        coords_w = torch.linspace(-1, 1, W, device=code.device, dtype=code.dtype)
+        grid_h, grid_w = torch.meshgrid(coords_h, coords_w, indexing="ij")
+        # [1, 2, H, W] → expand to [B, 2, H, W]
+        coords = torch.stack([grid_h, grid_w], dim=0).unsqueeze(0).expand(B, -1, -1, -1)
+        coords = coords * self.spatial_weight
+        return torch.cat([code, coords], dim=1)  # [B, C+2, H, W]
+
 
     def forward(self, x):
         # in lightning, forward defines the prediction/inference actions
@@ -246,7 +264,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         loss += linear_loss
         self.log('loss/linear', linear_loss, **log_args)
 
-        cluster_loss, cluster_probs = self.cluster_probe(detached_code, alpha=10.0)
+        code_with_pos = self._add_spatial_coords(detached_code)
+        cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=5.0)
         loss += cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)
         self.log('loss/total', loss, **log_args)
@@ -294,7 +313,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             linear_preds = linear_preds.argmax(1)
             self.linear_metrics.update(linear_preds, label)
 
-            cluster_loss, cluster_preds = self.cluster_probe(code, None)
+            code_with_pos = self._add_spatial_coords(code)
+            cluster_loss, cluster_preds = self.cluster_probe(code_with_pos, None)
             cluster_preds = cluster_preds.argmax(1)
 
             # ── Cluster Probe Debugging ──────────────────────────────────
