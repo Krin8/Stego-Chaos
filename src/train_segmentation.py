@@ -1,6 +1,7 @@
 import matplotlib
 matplotlib.use('Agg')
 import os
+
 from torch.optim.lr_scheduler import LambdaLR
 from utils import *
 from modules import *
@@ -139,6 +140,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         return torch.cat([code, coords], dim=1)  # [B, C+2, H, W]
 
 
+
     def forward(self, x):
         # in lightning, forward defines the prediction/inference actions
         return self.net(x)[1]
@@ -272,7 +274,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         loss += linear_loss
         self.log('loss/linear', linear_loss, **log_args)
 
-        code_with_pos = self._add_spatial_coords(detached_code)
+        code_with_pos = self._add_spatial_coords(code)
         cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=5.0)
         loss += cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)

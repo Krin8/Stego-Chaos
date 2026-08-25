@@ -291,7 +291,11 @@ class ClusterLookup(nn.Module):
     def init_from(self, embeddings: torch.Tensor):
         with torch.no_grad():
             n = min(embeddings.shape[0], self.n_classes)
-            self.clusters.data[:n, :] = embeddings[:n, :].to(self.clusters.device)
+            embed_dim = min(embeddings.shape[1], self.dim)
+            self.clusters.data[:n, :embed_dim] = embeddings[:n, :embed_dim].to(self.clusters.device)
+            # If the cluster probe has extra dimensions (like spatial coords), zero them out
+            if self.dim > embed_dim:
+                self.clusters.data[:n, embed_dim:] = 0.0
 
     def forward(self, x, alpha, log_probs=False):
         normed_clusters = F.normalize(self.clusters, dim=1)

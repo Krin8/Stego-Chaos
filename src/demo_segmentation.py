@@ -1,5 +1,4 @@
 import os
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 import numpy as np
 import torch
@@ -30,8 +29,6 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
     return torch.device("cpu")
 
 

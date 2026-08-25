@@ -21,7 +21,7 @@ def get_feats(model, loader, device):
     return torch.cat(all_feats, dim=0).contiguous()
 
 
-@hydra.main(config_path="configs", config_name="train_config.yml")
+@hydra.main(config_path="configs", config_name="train_config.yaml")
 def my_app(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
     pytorch_data_dir = cfg.pytorch_data_dir
@@ -47,7 +47,10 @@ def my_app(cfg: DictConfig) -> None:
     res = 224
     n_batches = 16
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     if cfg.arch == "dino":
         from modules import DinoFeaturizer, LambdaLayer
         no_ap_model = torch.nn.Sequential(

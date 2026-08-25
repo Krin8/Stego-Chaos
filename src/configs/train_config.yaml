@@ -46,7 +46,7 @@ continuous: True
 dim: 128
 dropout: True
 zero_clamp: True
-spatial_weight: 5.0
+spatial_weight: 0.0
 
 lr: 1e-4
 backbone_lr: 1e-6
