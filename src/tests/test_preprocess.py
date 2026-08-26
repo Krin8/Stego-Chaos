@@ -105,7 +105,7 @@ def test_collect_samples_aligns_ct_by_index_and_mr_by_stem(tmp_path):
     assert preprocess.collect_samples(str(tmp_path / "empty")) == []
 
 
-def test_process_full_dataset_writes_split_outputs_and_skips_corrupt_slice(tmp_path, monkeypatch):
+def test_process_full_dataset_writes_split_outputs_and_skips_corrupt_slice(tmp_path, monkeypatch, capsys):
     data_root = _root(tmp_path / "data")
     _ct_patient(data_root, 1, names=("a.dcm",))
     _ct_patient(data_root, 2, names=("a.dcm", "bad.dcm"), corrupt="bad.dcm")
@@ -115,13 +115,17 @@ def test_process_full_dataset_writes_split_outputs_and_skips_corrupt_slice(tmp_p
     monkeypatch.setattr(preprocess, "DATA_ROOT", str(data_root))
     monkeypatch.setattr(preprocess, "OUTPUT_DIR", str(output))
     preprocess.process_full_dataset()
+    captured = capsys.readouterr()
     image_paths = sorted(output.glob("*/images/*.png"))
     label_paths = sorted(output.glob("*/labels/*.png"))
     assert len(image_paths) == 4
     assert len(label_paths) == 4
     assert {path.parent.parent.name for path in image_paths} == {"train", "val"}
-    assert all(path.name.startswith(("CT_p", "T1DUAL_p", "T2SPIR_p")) for path in image_paths)
-    assert all("_s" in path.name and path.stem.split("_s")[1].isdigit() for path in image_paths)
+    assert {path.name for path in image_paths} == {
+        "CT_p1_s0000.png", "CT_p2_s0001.png", "T1DUAL_p1_s0003.png", "T2SPIR_p2_s0004.png"
+    }
+    assert "SKIP" in captured.out
+    assert "[VAL]  Images: 2  |  Labels: 2  |  Skipped: 1" in captured.out
 
     empty_output = tmp_path / "empty_output"
     monkeypatch.setattr(preprocess, "DATA_ROOT", str(tmp_path / "not_there"))

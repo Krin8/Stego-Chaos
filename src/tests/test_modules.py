@@ -37,6 +37,11 @@ def test_tensor_correlation_matches_explicit_reference():
 
 
 def test_sample_corner_coordinate_returns_corner_pixel_with_align_corners():
+    x = torch.arange(1, 2 * 3 * 4 * 5 + 1, dtype=torch.float32).reshape(2, 3, 4, 5)
+    coords = torch.zeros(2, 3, 3, 2)
+    actual = modules.sample(x, coords)
+    assert actual.shape == (2, 3, 3, 3)
+
     x = torch.arange(1, 10, dtype=torch.float32).reshape(1, 1, 3, 3)
     coords = torch.tensor([[[[-1.0, -1.0]]]])
     actual = modules.sample(x, coords)
