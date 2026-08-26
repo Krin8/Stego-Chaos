@@ -234,12 +234,14 @@ class BiomedCLIPFeaturizer(nn.Module):
             #   shallow (sharp spatial boundaries) + next-deeper (semantic)
             shallow_feat = layers[0]   # sharpest edges & textures
             deeper_feat  = layers[1]   # one block deeper, more semantic
-            image_feat = self.feat_fusion(
-                torch.cat([shallow_feat, deeper_feat], dim=1)
-            )
+            backbone_feat = torch.cat([shallow_feat, deeper_feat], dim=1)
 
             if return_class_feat:
                 return torch.zeros(img.shape[0], self.n_feats, 1, 1, device=img.device)
+
+        # The fusion conv must stay outside no_grad, otherwise it never receives
+        # gradients and the backbone features remain a random projection.
+        image_feat = self.feat_fusion(backbone_feat)
 
         if self.use_text_prompts:
             if hasattr(self.full_model.visual, 'head') and hasattr(self.full_model.visual.head, 'proj'):
@@ -256,10 +258,13 @@ class BiomedCLIPFeaturizer(nn.Module):
             else:
                 code = image_feat
 
+        # The correspondence loss treats `feats` as a fixed target, so detach it;
+        # feat_fusion is still trained through the `code` branch.
+        feats = image_feat.detach()
         if self.cfg.dropout:
-            return self.dropout(image_feat), code
+            return self.dropout(feats), code
         else:
-            return image_feat, code
+            return feats, code
 
 
 class ResizeAndClassify(nn.Module):
@@ -278,10 +283,11 @@ class ResizeAndClassify(nn.Module):
 
 class ClusterLookup(nn.Module):
 
-    def __init__(self, dim: int, n_classes: int):
+    def __init__(self, dim: int, n_classes: int, entropy_weight: float = 0.0):
         super(ClusterLookup, self).__init__()
         self.n_classes = n_classes
         self.dim = dim
+        self.entropy_weight = entropy_weight
         self.clusters = torch.nn.Parameter(torch.randn(n_classes, dim))
 
     def reset_parameters(self):
@@ -309,11 +315,14 @@ class ClusterLookup(nn.Module):
             cluster_probs = nn.functional.softmax(inner_products * alpha, dim=1)
 
         cluster_loss = -(cluster_probs * inner_products).sum(1).mean()
-        
-        # Marginal entropy maximization to prevent collapse
-        avg_probs = cluster_probs.mean(dim=(0, 2, 3))
-        entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
-        cluster_loss -= 1.5 * entropy
+
+        # Mild marginal-entropy bonus guards against a single cluster claiming
+        # every pixel. Large weights instead force a uniform cluster marginal,
+        # which is wrong for CHAOS where background covers most of the image.
+        if self.entropy_weight > 0:
+            avg_probs = cluster_probs.mean(dim=(0, 2, 3))
+            entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
+            cluster_loss = cluster_loss - self.entropy_weight * entropy
 
         if log_probs:
             return nn.functional.log_softmax(inner_products * alpha, dim=1)
