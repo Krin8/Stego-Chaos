@@ -21,6 +21,8 @@ Labels:        No transforms — saved as-is.
 """
 
 import os
+import sys
+
 import numpy as np
 import pydicom
 import cv2
@@ -98,8 +100,12 @@ def preprocess_mri_slice(dcm_path):
         arr_min, arr_max = arr.min(), arr.max()
         if arr_max > arr_min:
             arr = (arr - arr_min) / (arr_max - arr_min)
-    except Exception:
-        pass  # If N4 fails on a slice, keep the uncorrected version
+    except RuntimeError as e:
+        # N4 is a best-effort enhancement: keep the uncorrected slice, but never
+        # hide the failure — a whole run silently falling back would otherwise
+        # look identical to a run with bias correction applied.
+        tqdm.write(f"  WARN N4 bias correction failed for {dcm_path}, "
+                   f"using uncorrected slice: {e}")
 
     # C. Rescale to uint8
     rescaled = (arr * 255).astype(np.uint8)
@@ -141,6 +147,10 @@ def collect_samples(data_root):
             mask_files = sorted([f for f in os.listdir(ground_dir)
                                  if f.lower().endswith(".png")])
 
+            if len(mask_files) != len(dcm_files):
+                print(f"   WARN CT patient {pid}: {len(dcm_files)} DICOM slices but "
+                      f"{len(mask_files)} masks — index alignment is unreliable")
+
             # Index-based alignment (both sorted)
             for i, dcm in enumerate(dcm_files):
                 mask = os.path.join(ground_dir, mask_files[i]) \
@@ -176,16 +186,24 @@ def collect_samples(data_root):
                               if f.lower().endswith(".png")}
 
                 # Name-based alignment (DICOM stem == mask stem)
+                unmatched = 0
                 for dcm in dcm_files:
                     stem = os.path.splitext(dcm)[0]
-                    mask_path = os.path.join(ground_dir, mask_files[stem]) \
-                                if stem in mask_files else None
+                    if stem in mask_files:
+                        mask_path = os.path.join(ground_dir, mask_files[stem])
+                    else:
+                        mask_path = None
+                        unmatched += 1
                     samples.append((
                         os.path.join(dicom_dir, dcm),
                         mask_path,
                         seq,
                         pid
                     ))
+
+                if unmatched:
+                    print(f"   WARN MR patient {pid} {seq}: {unmatched} of "
+                          f"{len(dcm_files)} slices have no matching mask")
 
     return samples
 
@@ -203,8 +221,9 @@ def process_full_dataset():
     print(f"   Found {len(all_samples)} total slices")
 
     if not all_samples:
-        print("ERROR: No samples found. Check DATA_ROOT path.")
-        return
+        raise FileNotFoundError(
+            f"No CHAOS samples found under {DATA_ROOT}. Expected "
+            f"'CT/<pid>/DICOM_anon' and/or 'MR/<pid>/<seq>/DICOM_anon' subdirectories.")
 
     # --- Patient-level split (per modality group) ---
     # Group patients by modality category (CT vs MR)
@@ -253,8 +272,10 @@ def process_full_dataset():
                 img = preprocess_ct_slice(dcm_path)
             else:
                 img = preprocess_mri_slice(dcm_path)
-        except Exception as e:
-            tqdm.write(f"  SKIP {dcm_path}: {e}")
+        except (OSError, ValueError, AttributeError, RuntimeError) as e:
+            # A single unreadable slice should not abort the whole dataset, but the
+            # failure is reported here and counted in the summary below.
+            tqdm.write(f"  SKIP {dcm_path}: {type(e).__name__}: {e}")
             stats[split]["skipped"] += 1
             continue
 
@@ -288,6 +309,16 @@ def process_full_dataset():
               f"Labels: {s['labels']}  |  Skipped: {s['skipped']}")
     print("=" * 60)
 
+    written = sum(stats[split]["images"] for split in ("train", "val"))
+    skipped = sum(stats[split]["skipped"] for split in ("train", "val"))
+    if written == 0:
+        raise RuntimeError(
+            f"Every one of the {skipped} collected slices failed to preprocess; "
+            f"no images were written to {OUTPUT_DIR}.")
+
 
 if __name__ == "__main__":
-    process_full_dataset()
+    try:
+        process_full_dataset()
+    except (FileNotFoundError, RuntimeError) as e:
+        sys.exit(f"ERROR: {e}")

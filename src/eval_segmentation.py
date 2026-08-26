@@ -151,6 +151,12 @@ def my_app(cfg: DictConfig) -> None:
                     saved_data["label"].append(label.cpu())
                     saved_data["img"].append(img.cpu())
 
+        if not saved_data:
+            raise RuntimeError(
+                f"No batches were evaluated for dataset '{model.cfg.dataset_name}' "
+                f"(image_set=val, pytorch_data_dir={pytorch_data_dir}); "
+                "the test dataloader is empty.")
+
         saved_data = {k: torch.cat(v, dim=0) for k, v in saved_data.items()}
 
         tb_metrics = {

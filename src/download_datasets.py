@@ -2,7 +2,6 @@ from utils import *
 import hydra
 from omegaconf import DictConfig
 import os
-import wget
 
 
 @hydra.main(config_path="configs", config_name="eval_config.yml")
@@ -20,7 +19,8 @@ def my_app(cfg: DictConfig) -> None:
         if (not os.path.exists(join(pytorch_data_dir, dataset_name))) or \
                 (not os.path.exists(join(pytorch_data_dir, dataset_name + ".zip"))):
             print("\n Downloading {}".format(dataset_name))
-            wget.download(url_base + dataset_name + ".zip", join(pytorch_data_dir, dataset_name + ".zip"))
+            download_if_missing(url_base + dataset_name + ".zip",
+                                join(pytorch_data_dir, dataset_name + ".zip"))
         else:
             print("\n Found {}, skipping download".format(dataset_name))
 

@@ -18,6 +18,8 @@ def get_feats(model, loader, device):
         img = pack["img"]
         feats = F.normalize(model.forward(img.to(device)).mean([2, 3]), dim=1)
         all_feats.append(feats.to("cpu", non_blocking=True))
+    if not all_feats:
+        raise RuntimeError("The dataloader yielded no batches, cannot compute features.")
     return torch.cat(all_feats, dim=0).contiguous()
 
 
@@ -97,7 +99,8 @@ def my_app(cfg: DictConfig) -> None:
                     with torch.no_grad():
                         normed_feats = get_feats(par_model, loader, device)
                         all_nns = []
-                        step = normed_feats.shape[0] // n_batches
+                        # Keep at least one sample per batch for small datasets.
+                        step = max(1, normed_feats.shape[0] // n_batches)
                         print(normed_feats.shape)
                         for i in tqdm(range(0, normed_feats.shape[0], step)):
                             # torch.cuda.empty_cache()

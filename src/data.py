@@ -121,6 +121,11 @@ class CHAOS(Dataset):
         if self.use_preprocessed_data:
             self._collect_preprocessed_samples()
         else:
+            if not os.path.isdir(self.train_root):
+                raise FileNotFoundError(
+                    f"CHAOS train root not found: {self.train_root}. "
+                    f"pytorch_data_dir ({root}) must contain "
+                    f"'archive/CHAOS_Train_Sets/Train_Sets'.")
             self._collect_samples()
 
             # Patient-level 80/20 split — all slices of a patient stay together
@@ -133,6 +138,13 @@ class CHAOS(Dataset):
                     self.samples = [s for s in self.samples if s[3] in val_patients]
                 else:
                     self.samples = [s for s in self.samples if s[3] not in val_patients]
+
+        if not self.samples:
+            raise RuntimeError(
+                f"CHAOS dataset is empty for modality={modality!r}, "
+                f"image_set={image_set!r}, use_preprocessed_data={use_preprocessed_data} "
+                f"(searched under {root}). An empty dataset would silently produce "
+                f"a no-op training run.")
 
     # ------------------------------------------------------------------
     # Sample collection — exact paths from screenshots
@@ -355,10 +367,13 @@ class CHAOS(Dataset):
 
     def _collect_preprocessed_samples(self):
         parent_dir = os.path.dirname(os.path.abspath(self.root))
-        preprocessed_root = join(parent_dir, "preprocessed")
-        if not os.path.isdir(preprocessed_root):
-            preprocessed_root = join(self.root, "preprocessed")
-            
+        candidate_roots = [join(parent_dir, "preprocessed"), join(self.root, "preprocessed")]
+        preprocessed_root = next((p for p in candidate_roots if os.path.isdir(p)), None)
+        if preprocessed_root is None:
+            raise FileNotFoundError(
+                "No preprocessed CHAOS data found (use_preprocessed_data=True). "
+                f"Looked in: {', '.join(candidate_roots)}. Run preprocess.py first.")
+
         if self.image_set == "all":
             splits = ["train", "val"]
         else:
@@ -366,14 +381,23 @@ class CHAOS(Dataset):
             
         mods_wanted = self.MODALITIES if self.modality == "all" else (self.modality,)
         
+        missing_splits = [s for s in splits
+                          if not os.path.isdir(join(preprocessed_root, s, "images"))]
+        if len(missing_splits) == len(splits):
+            raise FileNotFoundError(
+                f"None of the requested splits {splits} exist under {preprocessed_root}; "
+                f"expected '<split>/images' directories. Run preprocess.py first.")
+        for split in missing_splits:
+            print(f"WARN preprocessed split '{split}' missing under {preprocessed_root}")
+
         for split in splits:
             split_dir = join(preprocessed_root, split)
             img_dir = join(split_dir, "images")
             label_dir = join(split_dir, "labels")
-            
+
             if not os.path.isdir(img_dir):
                 continue
-                
+
             for fname in sorted(os.listdir(img_dir)):
                 if not fname.lower().endswith(".png"):
                     continue
@@ -593,6 +617,9 @@ class NegativeImageDataset(Dataset):
     Used to supply completely different "negative" images to the contrastive loss.
     """
     def __init__(self, root_dir, transform=None):
+        if not os.path.isdir(root_dir):
+            raise FileNotFoundError(f"Negative image directory not found: {root_dir}")
+
         self.root_dir = root_dir
         self.transform = transform
         self.image_paths = []
@@ -602,6 +629,9 @@ class NegativeImageDataset(Dataset):
                     self.image_paths.append(os.path.join(root, file))
         # Sort or shuffle if necessary, but dataloader shuffle will handle randomizing batches
         self.image_paths = sorted(self.image_paths)
+
+        if not self.image_paths:
+            raise RuntimeError(f"No .dcm files found under {root_dir}")
 
     def __len__(self):
         return len(self.image_paths)
