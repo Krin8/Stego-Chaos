@@ -1,7 +1,6 @@
-import os
 from os.path import join
-from utils import get_transform, load_model, prep_for_plot, remove_axes, prep_args
-from modules import FeaturePyramidNet, DinoFeaturizer, BiomedCLIPFeaturizer, sample
+from utils import get_transform, prep_for_plot, remove_axes, prep_args, get_device, ensure_dirs
+from modules import build_featurizer, sample
 from data import ContrastiveSegDataset
 import hydra
 import matplotlib.animation as animation
@@ -65,8 +64,7 @@ def my_app(cfg: DictConfig) -> None:
     data_dir = join(cfg.output_root, "data")
     log_dir = join(cfg.output_root, "logs")
     result_dir = join(cfg.output_root, "results", "correspondence")
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
+    ensure_dirs(data_dir, log_dir)
     seed_everything(seed=0, workers=True)
     high_res = 512
 
@@ -91,18 +89,8 @@ def my_app(cfg: DictConfig) -> None:
         )
         loader = DataLoader(dataset, 16, shuffle=True, num_workers=cfg.num_workers)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    data_dir = join(cfg.output_root, "data")
-    if cfg.arch == "feature-pyramid":
-        cut_model = load_model(cfg.model_type, data_dir).to(device)
-        net = FeaturePyramidNet(cfg.granularity, cut_model, cfg.dim, cfg.continuous)
-    elif cfg.arch == "dino":
-        net = DinoFeaturizer(cfg.dim, cfg)
-    elif cfg.arch == "biomedclip":
-        net = BiomedCLIPFeaturizer(cfg.dim, cfg)
-    else:
-        raise ValueError("Unknown arch {}".format(cfg.arch))
-    net = net.to(device)
+    device = get_device()
+    net = build_featurizer(cfg.dim, cfg, data_dir, device)
 
     for batch_val in loader:
         batch = batch_val
@@ -208,7 +196,7 @@ def my_app(cfg: DictConfig) -> None:
 
                 frames.append(frame)
 
-            os.makedirs(result_dir, exist_ok=True)
+            ensure_dirs(result_dir)
 
             with tqdm(total=len(frames)) as pbar:
                 animation.ArtistAnimation(fig, frames, blit=True).save(

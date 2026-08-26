@@ -29,8 +29,7 @@ class DinoFeaturizer(nn.Module):
             num_classes=0)
         for p in self.model.parameters():
             p.requires_grad = False
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.eval().to(device)
+        self.model.eval().to(get_device())
         self.dropout = torch.nn.Dropout2d(p=.1)
 
         if arch == "vit_small" and patch_size == 16:
@@ -168,8 +167,7 @@ class BiomedCLIPFeaturizer(nn.Module):
         for p in self.model.parameters():
             p.requires_grad = False
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.model.eval().to(device)
+        self.model.eval().to(get_device())
         self.dropout = torch.nn.Dropout2d(p=.1)
 
         self.n_feats = 768
@@ -410,6 +408,22 @@ class FeaturePyramidNet(nn.Module):
             clusters = torch.log_softmax(avg_code, 1)
 
         return low_res_feats, clusters
+
+
+def build_featurizer(dim, cfg, data_dir=None, device=None):
+    """Build the backbone featurizer selected by ``cfg.arch``."""
+    if cfg.arch == "feature-pyramid":
+        if data_dir is None:
+            data_dir = join(cfg.output_root, "data")
+        cut_model = load_model(cfg.model_type, data_dir).to(device if device is not None else get_device())
+        net = FeaturePyramidNet(cfg.granularity, cut_model, dim, cfg.continuous)
+    elif cfg.arch == "dino":
+        net = DinoFeaturizer(dim, cfg)
+    elif cfg.arch == "biomedclip":
+        net = BiomedCLIPFeaturizer(dim, cfg)
+    else:
+        raise ValueError("Unknown arch {}".format(cfg.arch))
+    return net if device is None else net.to(device)
 
 
 class DoubleConv(nn.Module):

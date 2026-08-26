@@ -4,7 +4,6 @@ from datetime import datetime
 import PIL.Image
 import hydra
 import pytorch_lightning as pl
-import seaborn as sns
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -14,15 +13,6 @@ from torch.utils.tensorboard.summary import hparams
 from torchvision.transforms import ToTensor
 from data import *
 from modules import *
-from train_segmentation import get_class_labels
-
-
-
-@torch.jit.script
-def super_perm(size: int, device: torch.device):
-    perm = torch.randperm(size, device=device, dtype=torch.long)
-    perm[perm == torch.arange(size, device=device)] += 1
-    return perm % size
 
 
 def prep_fd_coord(fd):
@@ -167,30 +157,11 @@ class LitRecalibrator(pl.LightningModule):
             plt.plot(recalls, precisions, label="AP={}% {}".format(int(average_precision * 100), name))
 
         def plot_cm():
-            histogram = self.cm_metrics.histogram
-            fig = plt.figure(figsize=(10, 10))
-            ax = fig.gca()
-            hist = histogram.detach().cpu().to(torch.float32)
-            hist /= torch.clamp_min(hist.sum(dim=0, keepdim=True), 1)
-            sns.heatmap(hist.t(), annot=False, fmt='g', ax=ax, cmap="Blues", cbar=False)
-            ax.set_title('KNN Labels', fontsize=28)
-            ax.set_ylabel('Image labels', fontsize=28)
             names = get_class_labels(self.cfg.dataset_name)
             if self.cfg.extra_clusters:
                 names = names + ["Extra"]
-            ax.set_xticks(np.arange(0, len(names)) + .5)
-            ax.set_yticks(np.arange(0, len(names)) + .5)
-            ax.xaxis.tick_top()
-            ax.xaxis.set_ticklabels(names, fontsize=18)
-            ax.yaxis.set_ticklabels(names, fontsize=18)
-            colors = [self.label_cmap[i] / 255.0 for i in range(len(names))]
-            [t.set_color(colors[i]) for i, t in enumerate(ax.xaxis.get_ticklabels())]
-            [t.set_color(colors[i]) for i, t in enumerate(ax.yaxis.get_ticklabels())]
-            plt.xticks(rotation=90)
-            plt.yticks(rotation=0)
-            ax.vlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_xlim())
-            ax.hlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_ylim())
-            plt.tight_layout()
+            plot_confusion_matrix(self.cm_metrics.histogram, self.label_cmap, names,
+                                  'KNN Labels', 'Image labels')
 
         if self.trainer.is_global_zero:
             # plt.style.use('dark_background')
@@ -230,8 +201,7 @@ def my_app(cfg: DictConfig) -> None:
     data_dir = join(cfg.output_root, "data")
     log_dir = join(cfg.output_root, "logs")
     checkpoint_dir = join(cfg.output_root, "checkpoints")
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
+    ensure_dirs(data_dir, log_dir)
 
     seed_everything(seed=0, workers=True)
 
@@ -277,7 +247,7 @@ def my_app(cfg: DictConfig) -> None:
         default_hp_metric=False
     )
     steps = 1
-    accelerator_type = 'gpu' if torch.cuda.is_available() else 'cpu'
+    accelerator_type = get_accelerator_type()
     trainer = Trainer(
         log_every_n_steps=10,
         val_check_interval=steps,
@@ -288,7 +258,7 @@ def my_app(cfg: DictConfig) -> None:
         logger=tb_logger,
     )
     trainer.fit(model, train_loader, val_loader)
-    os.makedirs(join(checkpoint_dir, cfg.log_dir), exist_ok=True)
+    ensure_dirs(join(checkpoint_dir, cfg.log_dir))
 
 
 if __name__ == "__main__":

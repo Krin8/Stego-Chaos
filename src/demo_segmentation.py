@@ -8,7 +8,6 @@ from modules import *
 import hydra
 import torch.multiprocessing
 import matplotlib.pyplot as plt
-from PIL import Image, ImageOps
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, Dataset
 from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot
@@ -16,20 +15,11 @@ from tqdm import tqdm
 import random
 from data import create_chaos_colormap, ContrastiveSegDataset, CHAOS
 from scipy import ndimage
-
-try:
-    import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
+import dicom_utils
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-
-def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
+CT_WINDOW = (50.0, 400.0)
 
 
 def clean_segmentation(seg_map, n_classes, min_area=50):
@@ -68,31 +58,18 @@ class DicomImageFolder(Dataset):
 
     @staticmethod
     def _load_dicom_as_pil(dcm_path):
-        dcm = pydicom.dcmread(dcm_path)
-        arr = dcm.pixel_array.astype(np.float32)
-        if hasattr(dcm, 'RescaleSlope') and hasattr(dcm, 'RescaleIntercept'):
-            arr = arr * float(dcm.RescaleSlope) + float(dcm.RescaleIntercept)
-        is_ct = hasattr(dcm, 'Modality') and dcm.Modality == 'CT'
-        if is_ct:
-            wc, ww = 50, 400
-            lo, hi = wc - ww / 2, wc + ww / 2
-        else:
-            lo, hi = np.percentile(arr, (1, 99))
-        arr = np.clip(arr, lo, hi)
-        arr = (arr - lo) / (hi - lo) if hi > lo else np.zeros_like(arr)
-        arr = (arr * 255).astype(np.uint8)
-        img = Image.fromarray(arr, mode="L")
-        img = ImageOps.equalize(img)
-        return img.convert("RGB")
+        dcm = dicom_utils.read_dicom(dcm_path)
+        if dicom_utils.is_ct(dcm):
+            return dicom_utils.windowed_rgb_pil(dcm, CT_WINDOW, equalize=True)
+        return dicom_utils.percentile_rgb_pil(dcm, equalize=True, rescale=True)
 
     def __getitem__(self, index):
         dcm_path = self.dicom_paths[index]
-        
+
         # Determine modality before pixel reading
-        dcm = pydicom.dcmread(dcm_path, stop_before_pixels=True)
-        is_ct = hasattr(dcm, 'Modality') and dcm.Modality == 'CT'
-        
-        if is_ct:
+        header = dicom_utils.read_dicom(dcm_path, stop_before_pixels=True)
+
+        if dicom_utils.is_ct(header):
             image, _ = CHAOS._preprocess_ct_slice(dcm_path, None, self.transform, None, "CT")
         else:
             image = self._load_dicom_as_pil(dcm_path)
@@ -232,7 +209,7 @@ def apply_cluster_mapping(model, cluster_pred_np, lut, n_classes):
 @hydra.main(config_path="configs", config_name="demo_config.yaml")
 def my_app(cfg: DictConfig) -> None:
     result_dir = join(cfg.output_root, "predictions", cfg.experiment_name)
-    os.makedirs(join(result_dir, "grids"), exist_ok=True)
+    ensure_dirs(join(result_dir, "grids"))
 
     device = get_device()
     print(f"Using device: {device}")
@@ -263,10 +240,7 @@ def my_app(cfg: DictConfig) -> None:
         with torch.no_grad():
             img = img.to(device)
 
-            feats1, code1 = par_model(img)
-            feats2, code2 = par_model(img.flip(dims=[3]))
-            code = (code1 + code2.flip(dims=[3])) / 2
-            code = F.interpolate(code, img.shape[-2:], mode='bilinear', align_corners=False)
+            code = flip_averaged_code(par_model, img, img.shape[-2:])
 
             linear_preds = torch.argmax(
                 torch.log_softmax(model.linear_probe(code), dim=1), dim=1

@@ -28,17 +28,12 @@ Output structure (what CHAOSSeg expects):
     pytorch_data_dir/CHAOS/MR/val/images/   & labels/
 """
 
-import os
 import shutil
 import numpy as np
 from pathlib import Path
 from PIL import Image
 
-try:
-    import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
+import dicom_utils
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 pytorch_data_dir = "/content/drive/MyDrive/STEGO/src/pytorch_data_dir"
@@ -47,12 +42,7 @@ val_patient_ids  = [1, 2]   # these patients go to val, rest go to train
 
 
 def dicom_to_png(dcm_path):
-    ds = pydicom.dcmread(str(dcm_path))
-    arr = ds.pixel_array.astype(np.float32)
-    arr_min, arr_max = arr.min(), arr.max()
-    if arr_max > arr_min:
-        arr = (arr - arr_min) / (arr_max - arr_min) * 255.0
-    return Image.fromarray(arr.astype(np.uint8)).convert("RGB")
+    return dicom_utils.min_max_rgb_pil(dicom_utils.read_dicom(dcm_path))
 
 
 def save_zero_mask(shape, path):

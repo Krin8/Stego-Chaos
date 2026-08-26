@@ -1,12 +1,6 @@
-import io
-
-import PIL.Image
 import matplotlib.pyplot as plt
 import torch
 from tensorboardX import SummaryWriter
-from torch.nn import Sequential, Linear, LogSoftmax
-from torch.utils.data import Dataset
-from torchvision.transforms import ToTensor
 from utils import *
 from tqdm import tqdm
 from torch.utils.data import DataLoader
@@ -69,19 +63,9 @@ def my_app(cfg: DictConfig) -> None:
             else:
                 return torch.nn.functional.log_softmax(self.code_space, 1)
 
-    def add_plot(writer, name, step):
-        buf = io.BytesIO()
-        plt.savefig(buf, format='jpeg')
-        buf.seek(0)
-        image = PIL.Image.open(buf)
-        image = ToTensor()(image)
-        writer.add_image(name, image, step)
-        plt.clf()
-        plt.close()
-
     loader = DataLoader(dataset, n_images, shuffle=False, num_workers=0)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
 
     load_iter = iter(loader)
     for i in range(1):

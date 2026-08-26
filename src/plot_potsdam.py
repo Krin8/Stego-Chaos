@@ -14,10 +14,7 @@ def my_app(cfg: DictConfig) -> None:
     pytorch_data_dir = cfg.pytorch_data_dir
 
     result_dir = "../results/predictions/potsdam"
-    os.makedirs(result_dir, exist_ok=True)
-    os.makedirs(join(result_dir, "img"), exist_ok=True)
-    os.makedirs(join(result_dir, "label"), exist_ok=True)
-    os.makedirs(join(result_dir, "cluster"), exist_ok=True)
+    prepare_output_dirs(result_dir, "img", "label", "cluster")
 
     full_dataset = ContrastiveSegDataset(
         pytorch_data_dir=pytorch_data_dir,
@@ -33,14 +30,11 @@ def my_app(cfg: DictConfig) -> None:
                              shuffle=False, num_workers=cfg.num_workers,
                              pin_memory=True, collate_fn=flexible_collate)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     model = LitUnsupervisedSegmenter.load_from_checkpoint("../saved_models/potsdam_test.ckpt")
     print(OmegaConf.to_yaml(model.cfg))
     model.eval().to(device)
-    if torch.cuda.is_available():
-        par_model = torch.nn.DataParallel(model.net)
-    else:
-        par_model = model.net
+    par_model = maybe_data_parallel(model.net)
 
     outputs = defaultdict(list)
     for i, batch in enumerate(tqdm(test_loader)):
@@ -50,11 +44,7 @@ def my_app(cfg: DictConfig) -> None:
 
             img = batch["img"].to(device)
             label = batch["label"].to(device)
-            feats, code1 = par_model(img)
-            feats, code2 = par_model(img.flip(dims=[3]))
-            code = (code1 + code2.flip(dims=[3])) / 2
-
-            code = F.interpolate(code, label.shape[-2:], mode='bilinear', align_corners=False)
+            code = flip_averaged_code(par_model, img, label.shape[-2:])
             cluster_prob = model.cluster_probe(code, 2, log_probs=True)
             cluster_pred = cluster_prob.argmax(1)
 
