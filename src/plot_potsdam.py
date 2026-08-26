@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from data import *
 from modules import *
 from train_segmentation import LitUnsupervisedSegmenter
+from checkpoint_security import verify_sha256
 
 
 @hydra.main(config_path="configs", config_name="train_config.yml")
@@ -34,7 +35,15 @@ def my_app(cfg: DictConfig) -> None:
                              pin_memory=True, collate_fn=flexible_collate)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = LitUnsupervisedSegmenter.load_from_checkpoint("../saved_models/potsdam_test.ckpt")
+    checkpoint_path = "../saved_models/potsdam_test.ckpt"
+    verify_sha256(
+        checkpoint_path,
+        "556ea14da9d3cd11cf1ceccc3281a73959156bece7de1dd1d0be9ee43ff2d3b3",
+    )
+    model = LitUnsupervisedSegmenter.load_from_checkpoint(
+        checkpoint_path,
+        weights_only=False,
+    )
     print(OmegaConf.to_yaml(model.cfg))
     model.eval().to(device)
     if torch.cuda.is_available():

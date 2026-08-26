@@ -92,9 +92,9 @@ def load_model(model_type, data_dir):
         model = models.resnet50(pretrained=False)
         model_file = join(data_dir, 'imagenet_l2_3_0.pt')
         if not os.path.exists(model_file):
-            wget.download("http://6.869.csail.mit.edu/fa19/psets19/pset6/imagenet_l2_3_0.pt",
+            wget.download("https://www.dropbox.com/s/knf4uimlqsi1yz8/imagenet_l2_3_0.pt?dl=1",
                           model_file)
-        model_weights = torch.load(model_file)
+        model_weights = torch.load(model_file, weights_only=True)
         model_weights_modified = {name.split('model.')[1]: value for name, value in model_weights['model'].items() if
                                   'model' in name}
         model.load_state_dict(model_weights_modified)
@@ -105,7 +105,7 @@ def load_model(model_type, data_dir):
         if not os.path.exists(model_file):
             wget.download("https://cloudstor.aarnet.edu.au/plus/s/3GapXiWuVAzdKwJ/download",
                           model_file)
-        model_weights = torch.load(model_file)
+        model_weights = torch.load(model_file, weights_only=True)
         # model_weights_modified = {name.split('model.')[1]: value for name, value in model_weights['model'].items() if
         #                          'model' in name}
         model.load_state_dict(model_weights['state_dict'], strict=False)
@@ -119,7 +119,7 @@ def load_model(model_type, data_dir):
         if not os.path.exists(model_file):
             wget.download("https://dl.fbaipublicfiles.com/moco/moco_checkpoints/"
                           "moco_v2_800ep/moco_v2_800ep_pretrain.pth.tar", model_file)
-        checkpoint = torch.load(model_file)
+        checkpoint = torch.load(model_file, weights_only=True)
         # rename moco pre-trained keys
         state_dict = checkpoint['state_dict']
         for k in list(state_dict.keys()):

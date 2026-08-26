@@ -25,6 +25,8 @@ extra_clusters: 3
 use_true_labels: False
 use_recalibrator: False
 model_type: "vit_base"
+# Set this to the trusted output of: sha256sum <open_clip_pytorch_model.bin>
+biomedclip_weights_sha256: null
 arch: "dino"
 use_fit_model: True
 dino_feat_type: "feat"

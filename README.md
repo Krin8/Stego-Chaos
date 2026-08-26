@@ -57,6 +57,21 @@ cd src
 python download_models.py
 ```
 
+### Verify Legacy Checkpoints
+
+PyTorch Lightning checkpoints use Python pickle internally. Before evaluating or
+running a demo, calculate the SHA-256 digest from a trusted copy and set the
+matching `model_sha256` or `model_sha256s` configuration value:
+
+```shell script
+sha256sum /path/to/model.ckpt
+```
+
+The BiomedCLIP weight file is protected the same way through
+`biomedclip_weights_sha256`. For older checkpoints whose saved configuration
+does not contain that field, set `BIOMEDCLIP_WEIGHTS_SHA256` in the environment.
+Checkpoint loading fails closed when a digest is missing or does not match.
+
 ### Download Datasets
 
 First, change the `pytorch_data_dir` variable to your 

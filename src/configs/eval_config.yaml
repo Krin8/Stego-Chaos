@@ -12,6 +12,9 @@ use_ddp: False
 
 model_paths:
   - "/content/drive/MyDrive/STEGO/checkpoints/chaos/mIoU=46.8485.ckpt"
+model_sha256s:
+  # Set each entry to the trusted output of: sha256sum <model_path>
+  - null
 
 hydra:
   run:

@@ -33,6 +33,8 @@ use_true_labels: False
 use_recalibrator: False
 model_type: "vit_base"
 arch: "biomedclip"
+# Set this to the trusted output of: sha256sum <open_clip_pytorch_model.bin>
+biomedclip_weights_sha256: null
 use_fit_model: True
 use_text_prompts: False
 text_align_weight: 0.3

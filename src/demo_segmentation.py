@@ -14,14 +14,10 @@ from torch.utils.data import DataLoader, Dataset
 from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot
 from tqdm import tqdm
 import random
+import pydicom
 from data import create_chaos_colormap, ContrastiveSegDataset, CHAOS
 from scipy import ndimage
-
-try:
-    import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
+from checkpoint_security import verify_sha256
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -237,7 +233,11 @@ def my_app(cfg: DictConfig) -> None:
     device = get_device()
     print(f"Using device: {device}")
 
-    model = LitUnsupervisedSegmenter.load_from_checkpoint(cfg.model_path, weights_only=False)
+    verify_sha256(cfg.model_path, cfg.model_sha256)
+    model = LitUnsupervisedSegmenter.load_from_checkpoint(
+        cfg.model_path,
+        weights_only=False,
+    )
 
     label_cmap = create_chaos_colormap()
 
