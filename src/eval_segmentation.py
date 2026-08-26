@@ -10,14 +10,12 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot, get_class_labels
+from checkpoint_security import verify_sha256
 
 import os
 from os.path import join
 
 import torch
-from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
-
-torch.serialization.add_safe_globals([ModelCheckpoint])
 
 def plot_cm(histogram, label_cmap, cfg):
     fig = plt.figure(figsize=(10, 10))
@@ -68,9 +66,13 @@ def my_app(cfg: DictConfig) -> None:
     os.makedirs(join(result_dir, "label"), exist_ok=True)
     os.makedirs(join(result_dir, "cluster"), exist_ok=True)
 
-    for model_path in cfg.model_paths:
+    if len(cfg.model_paths) != len(cfg.model_sha256s):
+        raise ValueError("model_paths and model_sha256s must have the same length")
+
+    for model_path, model_sha256 in zip(cfg.model_paths, cfg.model_sha256s):
       
         torch.multiprocessing.set_sharing_strategy('file_system')
+        verify_sha256(model_path, model_sha256)
         model = LitUnsupervisedSegmenter.load_from_checkpoint(
             model_path,
             map_location="cpu",

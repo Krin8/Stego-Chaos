@@ -31,14 +31,9 @@ Output structure (what CHAOSSeg expects):
 import os
 import shutil
 import numpy as np
+import pydicom
 from pathlib import Path
 from PIL import Image
-
-try:
-    import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 pytorch_data_dir = "/content/drive/MyDrive/STEGO/src/pytorch_data_dir"

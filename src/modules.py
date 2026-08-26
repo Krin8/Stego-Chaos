@@ -1,6 +1,7 @@
 import torch
 
 from utils import *
+from checkpoint_security import verify_sha256
 import torch.nn.functional as F
 import dino.vision_transformer as vits
 
@@ -45,7 +46,11 @@ class DinoFeaturizer(nn.Module):
             raise ValueError("Unknown arch and patch size")
 
         if cfg.pretrained_weights is not None:
-            state_dict = torch.load(cfg.pretrained_weights, map_location="cpu")
+            state_dict = torch.load(
+                cfg.pretrained_weights,
+                map_location="cpu",
+                weights_only=True,
+            )
             state_dict = state_dict["teacher"]
             # remove `module.` prefix
             state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
@@ -59,7 +64,10 @@ class DinoFeaturizer(nn.Module):
             print('Pretrained weights found at {} and loaded with msg: {}'.format(cfg.pretrained_weights, msg))
         else:
             print("Since no pretrained weights have been provided, we load the reference pretrained DINO weights.")
-            state_dict = torch.hub.load_state_dict_from_url(url="https://dl.fbaipublicfiles.com/dino/" + url)
+            state_dict = torch.hub.load_state_dict_from_url(
+                url="https://dl.fbaipublicfiles.com/dino/" + url,
+                weights_only=True,
+            )
             self.model.load_state_dict(state_dict, strict=True)
 
         if arch == "vit_small":
@@ -136,6 +144,11 @@ class BiomedCLIPFeaturizer(nn.Module):
         base_dir = os.path.join(os.path.dirname(__file__), "BiomedCLIP-PubMedBERT_256-vit_base_patch16_224")
         config_path = os.path.join(base_dir, "open_clip_config.json")
         weights_path = os.path.join(base_dir, "open_clip_pytorch_model.bin")
+        weights_sha256 = (
+            cfg.get("biomedclip_weights_sha256")
+            or os.environ.get("BIOMEDCLIP_WEIGHTS_SHA256")
+        )
+        verify_sha256(weights_path, weights_sha256)
 
         with open(config_path, "r") as f:
             config = json.load(f)

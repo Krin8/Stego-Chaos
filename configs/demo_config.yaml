@@ -5,6 +5,8 @@ pytorch_data_dir: '/content/drive/MyDrive/STEGO/src/pytorch_data_dir/archive/CHA
 
 # Your trained CHAOS checkpoint
 model_path: "/content/drive/MyDrive/STEGO/checkpoints/chaos/mIoU=46.8485.ckpt"
+# Set this to the trusted output of: sha256sum <model_path>
+model_sha256: null
 
 experiment_name: "chaos_demo"
 
