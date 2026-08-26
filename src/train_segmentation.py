@@ -76,10 +76,14 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         else:
             self.text_embeddings = None
 
-        # Cluster probes take dim+2 to include (x,y) spatial coordinates
-        self.spatial_weight = getattr(cfg, 'spatial_weight', 5.0)
-        self.train_cluster_probe = ClusterLookup(dim + 2, n_classes)
-        self.cluster_probe = ClusterLookup(dim + 2, n_classes + cfg.extra_clusters)
+        # Cluster probes take dim+2 when (x,y) spatial coordinates are appended
+        self.spatial_weight = getattr(cfg, 'spatial_weight', 0.0)
+        self.cluster_alpha = getattr(cfg, 'cluster_alpha', 1.0)
+        cluster_dim = dim + 2 if self.spatial_weight > 0 else dim
+        entropy_weight = getattr(cfg, 'cluster_entropy_weight', 0.0)
+        self.train_cluster_probe = ClusterLookup(cluster_dim, n_classes, entropy_weight)
+        self.cluster_probe = ClusterLookup(
+            cluster_dim, n_classes + cfg.extra_clusters, entropy_weight)
         
         if self.text_embeddings is not None:
             self.train_cluster_probe.init_from(self.text_embeddings)
@@ -101,8 +105,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             "final/linear/", n_classes, 0, False)
 
         # Foreground-boosted class weights to combat background dominance
-        # Background gets weight 1.0, all foreground classes get 5.0
-        fg_weight = 5.0
+        fg_weight = getattr(cfg, 'linear_fg_weight', 3.0)
         class_weights = [1.0] + [fg_weight] * (n_classes - 1)
         self.register_buffer('linear_probe_weights', torch.tensor(class_weights))
         self.linear_probe_loss_fn = torch.nn.CrossEntropyLoss(weight=self.linear_probe_weights)
@@ -130,6 +133,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         This gives the cluster probe spatial awareness — critical for medical
         imaging where organs are distinguished by position, not appearance.
         """
+        if self.spatial_weight <= 0:
+            return code
         B, C, H, W = code.shape
         coords_h = torch.linspace(-1, 1, H, device=code.device, dtype=code.dtype)
         coords_w = torch.linspace(-1, 1, W, device=code.device, dtype=code.dtype)
@@ -274,8 +279,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         loss += linear_loss
         self.log('loss/linear', linear_loss, **log_args)
 
-        code_with_pos = self._add_spatial_coords(code)
-        cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=5.0)
+        code_with_pos = self._add_spatial_coords(detached_code)
+        cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=self.cluster_alpha)
         loss += cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)
         self.log('loss/total', loss, **log_args)
@@ -517,14 +522,16 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         net_optim = torch.optim.Adam(main_params, lr=self.cfg.lr)
         linear_probe_optim = torch.optim.Adam(list(self.linear_probe.parameters()), lr=5e-3)
-        cluster_probe_optim = torch.optim.Adam(list(self.cluster_probe.parameters()), lr=5e-4)
+        cluster_probe_optim = torch.optim.Adam(
+            list(self.cluster_probe.parameters()),
+            lr=getattr(self.cfg, 'cluster_lr', 5e-3))
 
         # Cosine annealing for the main network to prevent late-stage feature drift
         from torch.optim.lr_scheduler import CosineAnnealingLR
         net_scheduler = CosineAnnealingLR(net_optim, T_max=self.cfg.max_steps, eta_min=1e-6)
 
-        # Linear warmup for cluster probe: ramp from 0 → full LR over 500 steps
-        warmup_steps = 500
+        # Linear warmup for cluster probe: ramp from 0 → full LR
+        warmup_steps = getattr(self.cfg, 'cluster_warmup_steps', 100)
         def warmup_fn(step):
             if step < warmup_steps:
                 return float(step) / float(max(1, warmup_steps))
@@ -607,7 +614,7 @@ def my_app(cfg: DictConfig) -> None:
     train_loader = DataLoader(train_dataset, cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, pin_memory=False)
 
     neg_dataset = NegativeImageDataset(
-        root_dir="/Users/navneetbavineni/Downloads/Paired MRI (T1, T2) and CT Scans Dataset",
+        root_dir=cfg.neg_data_dir,
         transform=get_transform(cfg.res, False, cfg.loader_crop_type)
     )
     # Use drop_last=True so that we don't crash if the batch sizes don't perfectly align
