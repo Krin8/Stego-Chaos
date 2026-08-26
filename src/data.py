@@ -6,9 +6,27 @@ import numpy as np
 import torch
 import torch.multiprocessing
 from PIL import Image
-import pydicom
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+import dicom_utils
+
+
+# ---------------------------------------------------------------------------
+# Dataset metadata helpers
+# ---------------------------------------------------------------------------
+
+def get_class_labels(dataset_name):
+    if dataset_name == "chaos":
+        return ['background', 'liver', 'right kidney', 'left kidney', 'spleen']
+    else:
+        raise ValueError("Unknown Dataset {}".format(dataset_name))
+
+
+def get_label_cmap(dataset_name):
+    if dataset_name == "chaos":
+        return create_chaos_colormap()
+    return create_pascal_label_colormap()
 
 
 # ---------------------------------------------------------------------------
@@ -213,27 +231,10 @@ class CHAOS(Dataset):
 
     @staticmethod
     def _load_dicom_as_pil(dcm_path: str) -> Image.Image:
-        dcm = pydicom.dcmread(dcm_path)
-        arr = dcm.pixel_array.astype(np.float32)
-        
-        # Rescale to Hounsfield Units (HU) if metadata exists
-        intercept = getattr(dcm, 'RescaleIntercept', 0)
-        slope = getattr(dcm, 'RescaleSlope', 1)
-        arr = arr * slope + intercept
-
-        # Standard Abdominal Window (Level = 40, Width = 400)
-        # This highlights the liver, kidneys, and spleen while ignoring bone/air
-        W_level = 40
-        W_width = 400
-        lower_bound = W_level - (W_width / 2)
-        upper_bound = W_level + (W_width / 2)
-        
-        # Clip and normalize based on the fixed window
-        arr = np.clip(arr, lower_bound, upper_bound)
-        arr = (arr - lower_bound) / (upper_bound - lower_bound)
-        
-        arr = (arr * 255).astype(np.uint8)
-        return Image.fromarray(arr).convert("RGB")
+        # Standard abdominal window highlights liver, kidneys and spleen
+        # while ignoring bone and air.
+        return dicom_utils.windowed_rgb_pil(dicom_utils.read_dicom(dcm_path),
+                                            dicom_utils.ABDOMEN_WINDOW)
 
     @staticmethod
     def _preprocess_ct_slice(dcm_path: str, mask_path: str, transform, target_transform, modality: str) -> tuple:
@@ -273,12 +274,8 @@ class CHAOS(Dataset):
             if has_mask:
                 cropped_mask = resampled_mask
 
-        # 4. WINDOW (Soft Tissue [-150, 250])
-        windowed = np.clip(cropped_img, -150, 250)
-
-        # 5. NORMALIZE (0 to 1)
-        normalized = (windowed - (-150)) / (250 - (-150))
-        normalized = np.clip(normalized, 0, 1)
+        # 4. WINDOW (Soft Tissue [-150, 250]) and 5. NORMALIZE (0 to 1)
+        normalized = dicom_utils.clip_normalize(cropped_img, *dicom_utils.SOFT_TISSUE_BOUNDS)
 
         # 6. SPATIAL STANDARDIZATION (Padding)
         h, w = normalized.shape
@@ -321,8 +318,7 @@ class CHAOS(Dataset):
             final_mask_2d = None
 
         # Convert image back to PIL (0-255 uint8)
-        final_img_8bit = (final_img_2d * 255).astype(np.uint8)
-        img_pil = Image.fromarray(final_img_8bit).convert("RGB")
+        img_pil = dicom_utils.to_rgb_pil(dicom_utils.to_uint8(final_img_2d))
 
         seed = np.random.randint(2147483647)
         random.seed(seed); torch.manual_seed(seed)

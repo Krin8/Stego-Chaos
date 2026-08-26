@@ -5,7 +5,6 @@ from os.path import join
 import hydra
 import numpy as np
 import torch.multiprocessing
-import torch.multiprocessing
 import torch.nn as nn
 from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.utilities.seed import seed_everything
@@ -27,9 +26,7 @@ def my_app(cfg: DictConfig) -> None:
     pytorch_data_dir = cfg.pytorch_data_dir
     data_dir = join(cfg.output_root, "data")
     log_dir = join(cfg.output_root, "logs")
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(join(pytorch_data_dir, "nns"), exist_ok=True)
+    ensure_dirs(data_dir, log_dir, join(pytorch_data_dir, "nns"))
 
     seed_everything(seed=0)
 
@@ -47,30 +44,17 @@ def my_app(cfg: DictConfig) -> None:
     res = 224
     n_batches = 16
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    if cfg.arch == "dino":
-        from modules import DinoFeaturizer, LambdaLayer
+    device = get_device()
+    if cfg.arch in ("dino", "biomedclip"):
         no_ap_model = torch.nn.Sequential(
-            DinoFeaturizer(20, cfg),  # dim doesent matter
-            LambdaLayer(lambda p: p[0]),
-        ).to(device)
-    elif cfg.arch == "biomedclip":
-        from modules import BiomedCLIPFeaturizer, LambdaLayer
-        no_ap_model = torch.nn.Sequential(
-            BiomedCLIPFeaturizer(20, cfg),  # dim doesent matter
+            build_featurizer(20, cfg, data_dir),  # dim doesent matter
             LambdaLayer(lambda p: p[0]),
         ).to(device)
     else:
-        cut_model = load_model(cfg.model_type, join(cfg.output_root, "data")).to(device)
+        cut_model = load_model(cfg.model_type, data_dir).to(device)
         no_ap_model = nn.Sequential(*list(cut_model.children())[:-1]).to(device)
-    
-    if torch.cuda.is_available():
-        par_model = torch.nn.DataParallel(no_ap_model)
-    else:
-        par_model = no_ap_model
+
+    par_model = maybe_data_parallel(no_ap_model)
 
     for crop_type in crop_types:
         for image_set in image_sets:

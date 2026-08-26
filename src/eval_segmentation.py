@@ -3,13 +3,12 @@ from data import *
 from collections import defaultdict
 from multiprocessing import Pool
 import hydra
-import seaborn as sns
 import torch.multiprocessing
-from crf import dense_crf
+from crf import batched_crf
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from train_segmentation import LitUnsupervisedSegmenter, prep_for_plot, get_class_labels
+from train_segmentation import LitUnsupervisedSegmenter
 
 import os
 from os.path import join
@@ -20,42 +19,10 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 torch.serialization.add_safe_globals([ModelCheckpoint])
 
 def plot_cm(histogram, label_cmap, cfg):
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.gca()
-    hist = histogram.detach().cpu().to(torch.float32)
-    hist /= torch.clamp_min(hist.sum(dim=0, keepdim=True), 1)
-    sns.heatmap(hist.t(), annot=False, fmt='g', ax=ax, cmap="Blues", cbar=False)
-    ax.set_title('Predicted labels', fontsize=28)
-    ax.set_ylabel('True labels', fontsize=28)
-
     names = get_class_labels(cfg.dataset_name)
     if cfg.extra_clusters:
         names = names + ["Extra"]
-
-    ax.set_xticks(np.arange(0, len(names)) + .5)
-    ax.set_yticks(np.arange(0, len(names)) + .5)
-    ax.xaxis.tick_top()
-    ax.xaxis.set_ticklabels(names, fontsize=18)
-    ax.yaxis.set_ticklabels(names, fontsize=18)
-
-    colors = [label_cmap[i] / 255.0 for i in range(len(names))]
-    [t.set_color(colors[i]) for i, t in enumerate(ax.xaxis.get_ticklabels())]
-    [t.set_color(colors[i]) for i, t in enumerate(ax.yaxis.get_ticklabels())]
-
-    plt.xticks(rotation=90)
-    plt.yticks(rotation=0)
-    ax.vlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_xlim())
-    ax.hlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_ylim())
-    plt.tight_layout()
-
-
-def _apply_crf(tup):
-    return dense_crf(tup[0], tup[1])
-
-
-def batched_crf(pool, img_tensor, prob_tensor):
-    outputs = pool.map(_apply_crf, zip(img_tensor.detach().cpu(), prob_tensor.detach().cpu()))
-    return torch.cat([torch.from_numpy(arr).unsqueeze(0) for arr in outputs], dim=0)
+    plot_confusion_matrix(histogram, label_cmap, names, 'Predicted labels', 'True labels')
 
 
 @hydra.main(config_path="configs", config_name="eval_config.yaml")
@@ -64,9 +31,7 @@ def my_app(cfg: DictConfig) -> None:
     pytorch_data_dir = cfg.pytorch_data_dir
     result_dir = "../results/predictions/{}".format(cfg.experiment_name)
 
-    os.makedirs(join(result_dir, "img"), exist_ok=True)
-    os.makedirs(join(result_dir, "label"), exist_ok=True)
-    os.makedirs(join(result_dir, "cluster"), exist_ok=True)
+    prepare_output_dirs(result_dir, "img", "label", "cluster")
 
     for model_path in cfg.model_paths:
       
@@ -100,10 +65,10 @@ def my_app(cfg: DictConfig) -> None:
             collate_fn=flexible_collate
         )
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
         model.eval().to(device)
 
-        par_model = torch.nn.DataParallel(model.net) if (cfg.use_ddp and torch.cuda.is_available()) else model.net
+        par_model = maybe_data_parallel(model.net, cfg.use_ddp)
 
         saved_data = defaultdict(list)
 
@@ -114,23 +79,11 @@ def my_app(cfg: DictConfig) -> None:
                     img = batch["img"].to(device)
                     label = batch["label"].to(device)
 
-                    # CHAOS-style forward (from Code 1)
-                    feats, code1 = par_model(img)
-                    feats, code2 = par_model(img.flip(dims=[3]))
-                    code = (code1 + code2.flip(dims=[3])) / 2
-
-                    # Test-time augmentation (flip averaging)
-                    code = (code1 + code2.flip(dims=[3])) / 2
-
-                    # Resize to match label
-                    code = F.interpolate(code, label.shape[-2:], mode='bilinear', align_corners=False)
+                    # Flip-averaged test-time augmentation, resized to match label
+                    code = flip_averaged_code(par_model, img, label.shape[-2:])
 
                     # Predictions
                     linear_probs = torch.log_softmax(model.linear_probe(code), dim=1)
-
-                    # code = F.interpolate(code, label.shape[-2:], mode='bilinear', align_corners=False)
-
-                    # linear_probs = torch.log_softmax(model.linear_probe(code), dim=1)
 
                     # CHAOS cluster format
                     cluster_loss, cluster_probs = model.cluster_probe(code, None)

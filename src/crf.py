@@ -43,3 +43,12 @@ def dense_crf(image_tensor: torch.FloatTensor, output_logits: torch.FloatTensor)
     Q = d.inference(MAX_ITER)
     Q = np.array(Q).reshape((c, h, w))
     return Q
+
+
+def _apply_crf(tup):
+    return dense_crf(tup[0], tup[1])
+
+
+def batched_crf(pool, img_tensor, prob_tensor):
+    outputs = pool.map(_apply_crf, zip(img_tensor.detach().cpu(), prob_tensor.detach().cpu()))
+    return torch.cat([torch.from_numpy(arr).unsqueeze(0) for arr in outputs], dim=0)

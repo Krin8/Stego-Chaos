@@ -20,6 +20,71 @@ from torchvision import transforms as T
 from torch.utils.tensorboard.summary import hparams
 
 
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def get_accelerator_type():
+    return "gpu" if torch.cuda.is_available() else "cpu"
+
+
+def maybe_data_parallel(module, enabled=True):
+    if enabled and torch.cuda.is_available():
+        return torch.nn.DataParallel(module)
+    return module
+
+
+def ensure_dirs(*paths):
+    for path in paths:
+        os.makedirs(path, exist_ok=True)
+
+
+def prepare_output_dirs(root, *names):
+    dirs = tuple(join(root, name) for name in names)
+    ensure_dirs(*dirs)
+    return dirs
+
+
+def flip_averaged_code(net, img, size=None):
+    """Test-time augmentation: average the code of an image and its mirror."""
+    _, code1 = net(img)
+    _, code2 = net(img.flip(dims=[3]))
+    code = (code1 + code2.flip(dims=[3])) / 2
+    if size is not None:
+        code = F.interpolate(code, size, mode="bilinear", align_corners=False)
+    return code
+
+
+def plot_confusion_matrix(histogram, label_cmap, names, x_label, y_label,
+                          figsize=(10, 10), cbar=False, label_fontsize=28, tick_fontsize=18):
+    import seaborn as sns
+
+    fig = plt.figure(figsize=figsize)
+    ax = fig.gca()
+    hist = histogram.detach().cpu().to(torch.float32)
+    hist /= torch.clamp_min(hist.sum(dim=0, keepdim=True), 1)
+    sns.heatmap(hist.t(), annot=False, fmt='g', ax=ax, cmap="Blues", cbar=cbar)
+    ax.set_title(x_label, fontsize=label_fontsize)
+    ax.set_ylabel(y_label, fontsize=label_fontsize)
+
+    ax.set_xticks(np.arange(0, len(names)) + .5)
+    ax.set_yticks(np.arange(0, len(names)) + .5)
+    ax.xaxis.tick_top()
+    ax.xaxis.set_ticklabels(names, fontsize=tick_fontsize)
+    ax.yaxis.set_ticklabels(names, fontsize=tick_fontsize)
+
+    colors = [label_cmap[i] / 255.0 for i in range(len(names))]
+    [t.set_color(colors[i]) for i, t in enumerate(ax.xaxis.get_ticklabels())]
+    [t.set_color(colors[i]) for i, t in enumerate(ax.yaxis.get_ticklabels())]
+
+    plt.xticks(rotation=90)
+    plt.yticks(rotation=0)
+    ax.vlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_xlim())
+    ax.hlines(np.arange(0, len(names) + 1), color=[.5, .5, .5], *ax.get_ylim())
+    plt.tight_layout()
+    return ax
+
+
 def prep_for_plot(img, rescale=True, resize=None):
     if resize is not None:
         img = F.interpolate(img.unsqueeze(0), resize, mode="bilinear")

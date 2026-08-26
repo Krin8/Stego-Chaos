@@ -22,11 +22,11 @@ Labels:        No transforms — saved as-is.
 
 import os
 import numpy as np
-import pydicom
-import cv2
 import SimpleITK as sitk
 from PIL import Image
 from tqdm.auto import tqdm
+
+import dicom_utils
 
 
 # ===========================================================================
@@ -53,20 +53,14 @@ def preprocess_ct_slice(dcm_path):
     Returns:
         final_img: preprocessed uint8 image (native resolution, no padding)
     """
-    ds = pydicom.dcmread(dcm_path)
-    hu = ds.pixel_array.astype(np.float32) * ds.RescaleSlope + ds.RescaleIntercept
+    hu = dicom_utils.read_hounsfield(dcm_path)
 
-    # A. Windowing [-150, 250]
-    windowed = np.clip(hu, -150, 250)
-
-    # B. Rescale to [0, 255] uint8
-    rescaled = ((windowed + 150) / 400 * 255).astype(np.uint8)
+    # A. Windowing [-150, 250] and B. rescale to [0, 255] uint8
+    rescaled = dicom_utils.to_uint8(
+        dicom_utils.clip_normalize(hu, *dicom_utils.SOFT_TISSUE_BOUNDS))
 
     # C. CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(rescaled)
-
-    return enhanced
+    return dicom_utils.apply_clahe(rescaled)
 
 
 def preprocess_mri_slice(dcm_path):
@@ -75,16 +69,10 @@ def preprocess_mri_slice(dcm_path):
     Returns:
         final_img: preprocessed uint8 image (native resolution, no padding)
     """
-    ds = pydicom.dcmread(dcm_path)
-    arr = ds.pixel_array.astype(np.float32)
+    ds = dicom_utils.read_dicom(dcm_path)
 
     # A. Percentile normalization (1st–99th)
-    lo, hi = np.percentile(arr, (1, 99))
-    arr = np.clip(arr, lo, hi)
-    if hi > lo:
-        arr = (arr - lo) / (hi - lo)
-    else:
-        arr = np.zeros_like(arr)
+    arr = dicom_utils.percentile_normalize(ds.pixel_array.astype(np.float32))
 
     # B. N4 Bias Field Correction
     #    N4 requires positive values, so we work on the [0,1] normalized data
@@ -102,13 +90,10 @@ def preprocess_mri_slice(dcm_path):
         pass  # If N4 fails on a slice, keep the uncorrected version
 
     # C. Rescale to uint8
-    rescaled = (arr * 255).astype(np.uint8)
+    rescaled = dicom_utils.to_uint8(arr)
 
     # D. CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(rescaled)
-
-    return enhanced
+    return dicom_utils.apply_clahe(rescaled)
 
 
 # ===========================================================================

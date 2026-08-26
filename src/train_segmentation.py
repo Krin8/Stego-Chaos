@@ -22,13 +22,6 @@ import sys
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-def get_class_labels(dataset_name):
-    if dataset_name == "chaos":
-        return ['background', 'liver', 'right kidney', 'left kidney', 'spleen']
-    else:
-        raise ValueError("Unknown Dataset {}".format(dataset_name))
-
-
 class LitUnsupervisedSegmenter(pl.LightningModule):
     def __init__(self, n_classes, cfg):
         super().__init__()
@@ -44,16 +37,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             dim = cfg.dim
 
         data_dir = join(cfg.output_root, "data")
-        if cfg.arch == "feature-pyramid":
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            cut_model = load_model(cfg.model_type, data_dir).to(device)
-            self.net = FeaturePyramidNet(cfg.granularity, cut_model, dim, cfg.continuous)
-        elif cfg.arch == "dino":
-            self.net = DinoFeaturizer(dim, cfg)
-        elif cfg.arch == "biomedclip":
-            self.net = BiomedCLIPFeaturizer(dim, cfg)
-        else:
-            raise ValueError("Unknown arch {}".format(cfg.arch))
+        self.net = build_featurizer(dim, cfg, data_dir)
 
         if getattr(cfg, "use_text_prompts", False):
             if cfg.chaos_modality == "CT":
@@ -69,8 +53,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                 else:
                     prompts.append(f"A {modality} scan showing the {label}")
             
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            text_embs = self.net.get_text_embeddings(prompts, device).detach()
+            text_embs = self.net.get_text_embeddings(prompts, get_device()).detach()
             self.register_buffer('text_embeddings', text_embs)
         
         else:
@@ -116,10 +99,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
         self.automatic_optimization = False
 
-        if self.cfg.dataset_name == "chaos":
-            self.label_cmap = create_chaos_colormap()
-        else:
-            self.label_cmap = create_pascal_label_colormap()
+        self.label_cmap = get_label_cmap(self.cfg.dataset_name)
 
         self.val_steps = 0
         self.save_hyperparameters()
@@ -550,9 +530,7 @@ def my_app(cfg: DictConfig) -> None:
     name = '{}_date_{}'.format(prefix, datetime.now().strftime('%b%d_%H-%M-%S'))
     cfg.full_name = prefix
 
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    ensure_dirs(data_dir, log_dir, checkpoint_dir)
 
     seed_everything(seed=0)
 
@@ -635,7 +613,7 @@ def my_app(cfg: DictConfig) -> None:
         save_dir=log_dir
     )
 
-    accelerator_type = 'gpu' if torch.cuda.is_available() else 'cpu'
+    accelerator_type = get_accelerator_type()
     if cfg.submitting_to_aml:
         gpu_args = dict(accelerator=accelerator_type, devices=1, val_check_interval=250)
 
