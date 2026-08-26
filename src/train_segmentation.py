@@ -410,6 +410,10 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
 
             if self.trainer.is_global_zero and not self.cfg.submitting_to_aml:
                 import random
+                if not self.validation_step_outputs:
+                    raise RuntimeError(
+                        "Validation epoch produced no outputs; the validation dataloader "
+                        "is empty so no metrics or plots can be computed.")
                 output_num = random.randint(0, len(self.validation_step_outputs) - 1)
                 output = {k: v.detach().cpu() for k, v in self.validation_step_outputs[output_num].items()}
 

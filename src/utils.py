@@ -2,6 +2,7 @@ import collections
 import os
 from os.path import join
 import io
+import warnings
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,6 +42,10 @@ def add_plot(writer, name, step):
     writers = writer if isinstance(writer, list) else [writer]
     
     for w in writers:
+        if not (hasattr(w, 'add_image') or hasattr(w, 'log')):
+            raise TypeError(
+                "Writer {} supports neither add_image nor log, cannot log plot '{}'"
+                .format(type(w).__name__, name))
         if hasattr(w, 'add_image'):
             image_tensor = T.ToTensor()(image)
             w.add_image(name, image_tensor, step)
@@ -87,13 +92,43 @@ def one_hot_feats(labels, n_classes):
     return F.one_hot(labels, n_classes).permute(0, 3, 1, 2).to(torch.float32)
 
 
+def _remove_if_exists(path):
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def download_if_missing(url, target_file):
+    """Download url to target_file unless it already exists.
+
+    The download goes to a temporary file that is only moved into place once it
+    completed, so an interrupted or failed download never leaves a truncated
+    file behind that later runs would mistake for a valid one.
+    """
+    if os.path.exists(target_file):
+        return target_file
+
+    parent = os.path.dirname(target_file)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    partial_file = target_file + ".part"
+    try:
+        wget.download(url, partial_file)
+        os.replace(partial_file, target_file)
+    except Exception as e:
+        _remove_if_exists(partial_file)
+        raise RuntimeError("Failed to download {} to {}".format(url, target_file)) from e
+    except BaseException:
+        _remove_if_exists(partial_file)
+        raise
+    return target_file
+
+
 def load_model(model_type, data_dir):
     if model_type == "robust_resnet50":
         model = models.resnet50(pretrained=False)
-        model_file = join(data_dir, 'imagenet_l2_3_0.pt')
-        if not os.path.exists(model_file):
-            wget.download("http://6.869.csail.mit.edu/fa19/psets19/pset6/imagenet_l2_3_0.pt",
-                          model_file)
+        model_file = download_if_missing(
+            "http://6.869.csail.mit.edu/fa19/psets19/pset6/imagenet_l2_3_0.pt",
+            join(data_dir, 'imagenet_l2_3_0.pt'))
         model_weights = torch.load(model_file)
         model_weights_modified = {name.split('model.')[1]: value for name, value in model_weights['model'].items() if
                                   'model' in name}
@@ -101,10 +136,9 @@ def load_model(model_type, data_dir):
         model = nn.Sequential(*list(model.children())[:-1])
     elif model_type == "densecl":
         model = models.resnet50(pretrained=False)
-        model_file = join(data_dir, 'densecl_r50_coco_1600ep.pth')
-        if not os.path.exists(model_file):
-            wget.download("https://cloudstor.aarnet.edu.au/plus/s/3GapXiWuVAzdKwJ/download",
-                          model_file)
+        model_file = download_if_missing(
+            "https://cloudstor.aarnet.edu.au/plus/s/3GapXiWuVAzdKwJ/download",
+            join(data_dir, 'densecl_r50_coco_1600ep.pth'))
         model_weights = torch.load(model_file)
         # model_weights_modified = {name.split('model.')[1]: value for name, value in model_weights['model'].items() if
         #                          'model' in name}
@@ -115,10 +149,10 @@ def load_model(model_type, data_dir):
         model = nn.Sequential(*list(model.children())[:-1])
     elif model_type == "mocov2":
         model = models.resnet50(pretrained=False)
-        model_file = join(data_dir, 'moco_v2_800ep_pretrain.pth.tar')
-        if not os.path.exists(model_file):
-            wget.download("https://dl.fbaipublicfiles.com/moco/moco_checkpoints/"
-                          "moco_v2_800ep/moco_v2_800ep_pretrain.pth.tar", model_file)
+        model_file = download_if_missing(
+            "https://dl.fbaipublicfiles.com/moco/moco_checkpoints/"
+            "moco_v2_800ep/moco_v2_800ep_pretrain.pth.tar",
+            join(data_dir, 'moco_v2_800ep_pretrain.pth.tar'))
         checkpoint = torch.load(model_file)
         # rename moco pre-trained keys
         state_dict = checkpoint['state_dict']
@@ -130,7 +164,9 @@ def load_model(model_type, data_dir):
             # delete renamed or unused k
             del state_dict[k]
         msg = model.load_state_dict(state_dict, strict=False)
-        assert set(msg.missing_keys) == {"fc.weight", "fc.bias"}
+        if set(msg.missing_keys) != {"fc.weight", "fc.bias"}:
+            raise RuntimeError(
+                "Unexpected missing keys when loading {}: {}".format(model_file, msg.missing_keys))
         model = nn.Sequential(*list(model.children())[:-1])
     elif model_type == "densenet121":
         model = models.densenet121(pretrained=True)
@@ -318,7 +354,11 @@ def flexible_collate(batch):
             out = elem.new(storage)
         try:
             return torch.stack(batch, 0, out=out)
-        except RuntimeError:
+        except RuntimeError as e:
+            # Tensors with mismatched shapes cannot be stacked; the batch is
+            # returned as a list so variable-sized samples still flow through.
+            warnings.warn("Could not stack batch of {} tensors, returning a list instead: {}"
+                          .format(len(batch), e))
             return batch
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':

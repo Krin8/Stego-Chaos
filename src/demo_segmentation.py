@@ -19,9 +19,9 @@ from scipy import ndimage
 
 try:
     import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
+except ImportError as e:
+    raise ImportError("pydicom is required to read DICOM inputs; install it with "
+                      "`pip install pydicom`") from e
 
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -54,8 +54,13 @@ class DicomImageFolder(Dataset):
         super().__init__()
         self.root = root
         self.transform = transform
+        if not os.path.isdir(root):
+            raise FileNotFoundError(f"DICOM image directory not found: {root}")
+
         self.dicom_paths = []
         self._discover(root)
+        if not self.dicom_paths:
+            raise RuntimeError(f"No .dcm files found under {root}")
         print(f"[DicomImageFolder] Found {len(self.dicom_paths)} DICOM files in {root}")
 
     def _discover(self, path):
@@ -167,8 +172,9 @@ def get_cluster_assignments(model, cfg, device):
         print(f"  Train dataset size: {len(val_dataset)} samples")
 
     if len(val_dataset) == 0:
-        print("  ERROR: Both val and train splits are empty. Check pytorch_data_dir path.")
-        return None, model.n_classes
+        raise RuntimeError(
+            "Both the val and train splits are empty, cluster assignments cannot be "
+            f"computed. Check pytorch_data_dir ({cfg.pytorch_data_dir}).")
 
     val_loader = DataLoader(
         val_dataset, batch_size=4, shuffle=False,
@@ -197,8 +203,9 @@ def get_cluster_assignments(model, cfg, device):
             break
 
     if raw is None:
-        print("  WARNING: Could not find assignment attribute.")
-        return None, model.n_classes
+        raise RuntimeError(
+            "No cluster assignment attribute found on cluster_metrics "
+            f"({type(model.cluster_metrics).__name__}); cannot map clusters to classes.")
 
     n_classes      = model.n_classes
     extra_clusters = getattr(model.cfg, 'extra_clusters', 0)
@@ -217,15 +224,9 @@ def get_cluster_assignments(model, cfg, device):
     return lut, n_classes
 
 
-def apply_cluster_mapping(model, cluster_pred_np, lut, n_classes):
-    if lut is not None:
-        safe   = np.clip(cluster_pred_np, 0, len(lut) - 1)
-        mapped = lut[safe]
-    else:
-        mapped = np.zeros_like(cluster_pred_np)
-
-
-
+def apply_cluster_mapping(cluster_pred_np, lut, n_classes):
+    safe = np.clip(cluster_pred_np, 0, len(lut) - 1)
+    mapped = lut[safe]
     return np.clip(mapped, 0, n_classes - 1)
 
 
@@ -279,7 +280,7 @@ def my_app(cfg: DictConfig) -> None:
                 input_img = (prep_for_plot(img[j].cpu()).numpy() * 255).clip(0, 255).astype(np.uint8)
 
                 raw_cluster    = cluster_preds[j].numpy()
-                cluster_mapped = apply_cluster_mapping(model, raw_cluster, lut, n_classes)
+                cluster_mapped = apply_cluster_mapping(raw_cluster, lut, n_classes)
                 cluster_mapped = clean_segmentation(cluster_mapped, n_classes)
                 cluster_img    = label_cmap[cluster_mapped]
 

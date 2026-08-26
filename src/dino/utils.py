@@ -384,7 +384,9 @@ def get_sha():
         diff = _run(['git', 'diff-index', 'HEAD'])
         diff = "has uncommited changes" if diff else "clean"
         branch = _run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'])
-    except Exception:
+    except (subprocess.SubprocessError, OSError):
+        # Git metadata is purely informational; a missing git binary or a
+        # non-repository working directory should not abort a run.
         pass
     message = f"sha: {sha}, status: {diff}, branch: {branch}"
     return message

@@ -553,7 +553,11 @@ class ContrastiveCorrelationLoss(nn.Module):
         
         # Ensure we don't try to take more samples than we have in the negative batch
         num_neg = min(self.cfg.neg_samples, min_batch)
-        
+        if num_neg < 1:
+            raise ValueError(
+                "Cannot compute the negative inter-image loss: neg_samples="
+                f"{self.cfg.neg_samples} and the smallest batch has {min_batch} images.")
+
         for i in range(num_neg):
             # Roll the negative batch to get different negative images for each sample in the batch
             rolled_neg_feats = torch.roll(neg_feats_matched, shifts=i, dims=0)

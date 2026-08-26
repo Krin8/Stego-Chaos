@@ -28,7 +28,6 @@ Output structure (what CHAOSSeg expects):
     pytorch_data_dir/CHAOS/MR/val/images/   & labels/
 """
 
-import os
 import shutil
 import numpy as np
 from pathlib import Path
@@ -36,9 +35,9 @@ from PIL import Image
 
 try:
     import pydicom
-except ImportError:
-    os.system("pip install pydicom -q")
-    import pydicom
+except ImportError as e:
+    raise ImportError("pydicom is required to read DICOM inputs; install it with "
+                      "`pip install pydicom`") from e
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 pytorch_data_dir = "/content/drive/MyDrive/STEGO/src/pytorch_data_dir"
@@ -90,6 +89,9 @@ for split in ["train", "val"]:
     (ct_output / split / "images").mkdir(parents=True, exist_ok=True)
     (ct_output / split / "labels").mkdir(parents=True, exist_ok=True)
 
+if not ct_input.is_dir():
+    raise FileNotFoundError(f"CT input directory not found: {ct_input}")
+
 for patient_dir in sorted([d for d in ct_input.iterdir() if d.is_dir() and d.name.isdigit()], key=lambda d: int(d.name)):
     patient_id = int(patient_dir.name)
     split = "val" if patient_id in val_patient_ids else "train"
@@ -108,6 +110,9 @@ mr_output = Path(pytorch_data_dir) / "CHAOS" / "MR"
 for split in ["train", "val"]:
     (mr_output / split / "images").mkdir(parents=True, exist_ok=True)
     (mr_output / split / "labels").mkdir(parents=True, exist_ok=True)
+
+if not mr_root.is_dir():
+    raise FileNotFoundError(f"MR input directory not found: {mr_root}")
 
 for patient_dir in sorted([d for d in mr_root.iterdir() if d.is_dir() and d.name.isdigit()], key=lambda d: int(d.name)):
     patient_id = int(patient_dir.name)

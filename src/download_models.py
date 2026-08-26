@@ -1,6 +1,7 @@
 from os.path import join, exists
-import wget
 import os
+
+from utils import download_if_missing
 
 models_dir = join("..", "models")
 os.makedirs(models_dir, exist_ok=True)
@@ -26,6 +27,6 @@ target_urls = [model_url_root + mn for mn in model_names] + \
 for target_file, target_url in zip(target_files, target_urls):
     if not exists(target_file):
         print("\nDownloading file from {}".format(target_url))
-        wget.download(target_url, target_file)
+        download_if_missing(target_url, target_file)
     else:
         print("\nFound {}, skipping download".format(target_file))
