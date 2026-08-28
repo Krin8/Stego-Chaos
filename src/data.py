@@ -439,7 +439,9 @@ class CHAOS(Dataset):
                 label = torch.full(img.shape[1:], -1, dtype=torch.long)
 
         img_sum = img.sum(0)
-        valid_mask = (img_sum > (img_sum.min() + 0.01)).float()
+        # Soft-tissue Intensity Window: Exclude air/lungs (dark) and bone (very bright)
+        # img_sum ranges from 0.0 to 3.0. Soft tissue usually lies between 0.3 and 2.5
+        valid_mask = ((img_sum > 0.3) & (img_sum < 2.5)).float()
         return img, label, valid_mask
 
 
@@ -502,6 +504,7 @@ class ContrastiveSegDataset(Dataset):
 
         self.mask                      = mask
         self.extra_transform           = extra_transform
+        self.aug_geometric_transform   = aug_geometric_transform
         self.aug_photometric_transform = aug_photometric_transform
         self.pos_images                = pos_images
         self.pos_labels                = pos_labels
@@ -537,6 +540,21 @@ class ContrastiveSegDataset(Dataset):
                 siblings = [idx]  # fallback: use self if only one slice
             self._pos_candidates.append(siblings)
 
+        # Load precomputed KNN neighbors if available
+        self.num_neighbors = num_neighbors
+        self.nns = None
+        if num_neighbors is not None and num_neighbors > 0:
+            model_type = getattr(cfg, "model_type", "vit_base")
+            nice_name = getattr(cfg, "dir_dataset_name", None) if dataset_name == "directory" else dataset_name
+            crop_t = getattr(cfg, "crop_type", "five")
+            nns_file = os.path.join(pytorch_data_dir, "nns",
+                                    f"nns_{model_type}_{nice_name}_{image_set}_{crop_t}_224.npz")
+            if os.path.exists(nns_file):
+                self.nns = torch.from_numpy(np.load(nns_file)["nns"])
+                print(f"Loaded KNN neighbors from {nns_file}, shape={self.nns.shape}")
+            else:
+                print(f"KNN file not found: {nns_file}, falling back to patient-based sampling")
+
     def __len__(self):
         return len(self.dataset)
 
@@ -550,9 +568,18 @@ class ContrastiveSegDataset(Dataset):
         seed = np.random.randint(2147483647)
         self._set_seed(seed)
 
-        # Sample a positive pair: different slice from the same patient
+        # Sample a positive pair using KNN neighbors or patient-based fallback
         if self.pos_images:
-            pos_idx = random.choice(self._pos_candidates[ind])
+            if self.nns is not None:
+                # Use precomputed KNN: pick a random neighbor from top-k
+                # Skip index 0 (self), pick from indices 1..num_neighbors
+                knn_neighbors = self.nns[ind]
+                k = min(self.num_neighbors, len(knn_neighbors))
+                pos_idx = knn_neighbors[random.randint(1, k - 1)].item()
+                pos_idx = min(pos_idx, len(self.dataset) - 1)  # bounds check
+            else:
+                # Fallback: patient-based sampling
+                pos_idx = random.choice(self._pos_candidates[ind])
             pos_pack = self.dataset[pos_idx]
         else:
             pos_pack = pack
@@ -574,10 +601,24 @@ class ContrastiveSegDataset(Dataset):
             "label":     extra(ind, pack[1]),
             "img_pos":   extra(ind, pos_pack[0]),
             "label_pos": extra(ind, pos_pack[1]),
-            "img_aug":   extra(ind, pack[0]),
-            "coord_aug": coord,
-            "coord":     coord,
         }
+
+        # Apply geometric augmentation to get img_aug + coord_aug
+        if self.aug_geometric_transform is not None:
+            aug_seed = np.random.randint(2147483647)
+            # Apply same random transform to both image and coordinate grid
+            self._set_seed(aug_seed)
+            ret["img_aug"] = self.aug_geometric_transform(extra(ind, pack[0]))
+            self._set_seed(aug_seed)
+            coord_aug = self.aug_geometric_transform(
+                coord.permute(2, 0, 1)  # [2, H, W] for torchvision transforms
+            ).permute(1, 2, 0)          # back to [H, W, 2]
+            ret["coord_aug"] = coord_aug
+        else:
+            ret["img_aug"] = extra(ind, pack[0])
+            ret["coord_aug"] = coord
+
+        ret["coord"] = coord
 
         if self.mask:
             ret["mask"] = pack[2]

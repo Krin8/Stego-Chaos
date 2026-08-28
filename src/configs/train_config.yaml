@@ -24,19 +24,19 @@ dir_dataset_n_classes: 5
 has_labels: True
 crop_type: "five"
 crop_ratio: .75
-res: 320
+res: 224
 loader_crop_type: "center"
 
 # Model Params
-extra_clusters: 2
+extra_clusters: 0
 use_true_labels: False
 use_recalibrator: False
 model_type: "vit_base"
 arch: "biomedclip"
 use_fit_model: True
-use_text_prompts: False
-text_align_weight: 0.1
-shallow_layer_n: 7          # how many blocks from end to tap: 7→block6, 5→block8, 4→block9(old)
+use_text_prompts: True
+text_align_weight: 0.05
+shallow_layer_n: 2          # extract the deepest 2 layers (blocks 11-12) for strongest semantic signal
 dino_feat_type: "feat"
 projection_type: "nonlinear"
 #projection_type: linear
@@ -47,9 +47,10 @@ dim: 128
 dropout: True
 zero_clamp: True
 spatial_weight: 0.0
+hungarian_weight: 2.0
 
 lr: 1e-4
-backbone_lr: 1e-6
+backbone_lr: 5e-7
 pretrained_weights: ~
 use_salience: True
 stabalize: False
@@ -59,9 +60,9 @@ stop_at_zero: True
 pointwise: True
 feature_samples: 25
 neg_samples: 20
-aug_alignment_weight: 1.0
+aug_alignment_weight: 0.5
 
-correspondence_weight: 1.0
+correspondence_weight: 0.5
 
 
 # IAROA vit small 1/31/22
@@ -72,11 +73,11 @@ neg_inter_shift: 0.46
 pos_inter_shift: 0.12
 pos_intra_shift: 0.18
 
-rec_weight: 0.5
+rec_weight: 0.2
 repulsion_weight: 0.0
 
 # CRF Params
-crf_weight: 2.0  # Increased for better boundary snapping
+crf_weight: 0.05  # Increased for better boundary snapping
 alpha: .5
 beta: .1
 gamma: .05
@@ -86,13 +87,13 @@ shift: 0.00
 crf_samples: 2000
 color_space: "rgb"
 
-reset_probe_steps: ~
+reset_probe_steps: 1500
 
 # Logging params
 n_images: 5
 scalar_log_freq: 10
 checkpoint_freq: 50
-val_freq: 100
+val_freq: 50
 hist_freq: 100
 
 

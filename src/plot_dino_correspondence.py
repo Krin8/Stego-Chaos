@@ -119,16 +119,31 @@ def my_app(cfg: DictConfig) -> None:
     with torch.no_grad():
         if cfg.plot_correspondence:
             img_num = 6
-            query_points = torch.tensor(
-                [
-                    [-.1, 0.0],
-                    [.5, .8],
-                    [-.7, -.7],
-                ]
-            ).reshape(1, 3, 1, 2).cpu()
-
             img = batch["img"][img_num:img_num + 1]
             img_pos = batch["img_pos"][img_num:img_num + 1]
+            
+            # Dynamic key points for video interpolation
+            if "mask" in batch:
+                valid_mask = batch["mask"][img_num].squeeze()
+                y_idx, x_idx = torch.where(valid_mask > 0)
+                if len(y_idx) > 3:
+                    idx1 = len(y_idx) // 4
+                    idx2 = len(y_idx) // 2
+                    idx3 = 3 * len(y_idx) // 4
+                    pts = [[y_idx[idx1], x_idx[idx1]], 
+                           [y_idx[idx2], x_idx[idx2]], 
+                           [y_idx[idx3], x_idx[idx3]]]
+                else:
+                    pts = [[img.shape[2]//2, img.shape[3]//2]] * 3
+            else:
+                pts = [[img.shape[2]//2, img.shape[3]//2]] * 3
+                
+            h, w = img.shape[2], img.shape[3]
+            query_points_list = []
+            for y, x in pts:
+                query_points_list.append([(y / h) * 2.0 - 1.0, (x / w) * 2.0 - 1.0])
+                
+            query_points = torch.tensor(query_points_list).reshape(1, 3, 1, 2).cpu()
 
             plt.style.use('dark_background')
             fig, axes = plt.subplots(1, 3, figsize=(3 * 5, 1 * 5), dpi=100)
@@ -157,12 +172,29 @@ def my_app(cfg: DictConfig) -> None:
             plt.show()
 
         if cfg.plot_movie:
-            img_num = 6
-            key_points = [
-                [-.7, -.7],
-                [-.1, 0.0],
-                [.5, .8],
-            ]
+            img = batch["img"][img_num:img_num + 1]
+            img_pos = batch["img_pos"][img_num:img_num + 1]
+
+            # Dynamic key points for video interpolation
+            if "mask" in batch:
+                valid_mask = batch["mask"][img_num].squeeze()
+                y_idx, x_idx = torch.where(valid_mask > 0)
+                if len(y_idx) > 3:
+                    idx1 = len(y_idx) // 4
+                    idx2 = len(y_idx) // 2
+                    idx3 = 3 * len(y_idx) // 4
+                    pts = [[y_idx[idx1], x_idx[idx1]], 
+                           [y_idx[idx2], x_idx[idx2]], 
+                           [y_idx[idx3], x_idx[idx3]]]
+                else:
+                    pts = [[img.shape[2]//2, img.shape[3]//2]] * 3
+            else:
+                pts = [[img.shape[2]//2, img.shape[3]//2]] * 3
+                
+            h, w = img.shape[2], img.shape[3]
+            key_points = []
+            for y, x in pts:
+                key_points.append([(y / h) * 2.0 - 1.0, (x / w) * 2.0 - 1.0])
             all_points = []
             for i in range(len(key_points)):
                 all_points.extend([key_points[i]] * 60)

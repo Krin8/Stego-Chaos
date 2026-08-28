@@ -183,12 +183,10 @@ class BiomedCLIPFeaturizer(nn.Module):
         # so the network gets both the sharpest spatial detail AND one
         # layer of additional semantic context.
         self.shallow_layer_n = getattr(cfg, "shallow_layer_n", 7)
-        # Fusion: concatenate shallow + next-deeper → project back to n_feats
-        self.feat_fusion = torch.nn.Sequential(
-            torch.nn.Conv2d(self.n_feats * 2, self.n_feats, (1, 1)),
-            torch.nn.GELU(),
-        )
-
+        # Fusion: simply add the shallow + next-deeper features instead of
+        # projecting with a randomly-initialized Conv2d, which corrupts 
+        # the pretrained representation and causes feature collapse.
+        self.feat_fusion = None
         self.cluster1 = self.make_clusterer(self.n_feats)
         self.proj_type = cfg.projection_type
         if self.proj_type == "nonlinear":
@@ -234,32 +232,40 @@ class BiomedCLIPFeaturizer(nn.Module):
             #   shallow (sharp spatial boundaries) + next-deeper (semantic)
             shallow_feat = layers[0]   # sharpest edges & textures
             deeper_feat  = layers[1]   # one block deeper, more semantic
-            image_feat = self.feat_fusion(
-                torch.cat([shallow_feat, deeper_feat], dim=1)
-            )
+            
+            # Simple addition preserves the pretrained feature representations
+            image_feat = shallow_feat + deeper_feat
 
             if return_class_feat:
                 return torch.zeros(img.shape[0], self.n_feats, 1, 1, device=img.device)
 
-        if self.use_text_prompts:
-            if hasattr(self.full_model.visual, 'head') and hasattr(self.full_model.visual.head, 'proj'):
-                code = image_feat.permute(0, 2, 3, 1)
-                code = self.full_model.visual.head.proj(code)
-                code = code.permute(0, 3, 1, 2)
-            else:
-                code = image_feat
+        # Always use the learnable projection heads for code generation.
+        # The text prompt alignment is handled separately in the training loop
+        # using get_visual_proj_features() which projects into CLIP's joint space.
+        if self.proj_type is not None:
+            code = self.cluster1(self.dropout(image_feat))
+            if self.proj_type == "nonlinear":
+                code += self.cluster2(self.dropout(image_feat))
         else:
-            if self.proj_type is not None:
-                code = self.cluster1(self.dropout(image_feat))
-                if self.proj_type == "nonlinear":
-                    code += self.cluster2(self.dropout(image_feat))
-            else:
-                code = image_feat
+            code = image_feat
 
         if self.cfg.dropout:
             return self.dropout(image_feat), code
         else:
             return image_feat, code
+
+    def get_visual_proj_features(self, image_feat):
+        """Project intermediate features into BiomedCLIP's CLIP joint space.
+        
+        This produces features comparable to text embeddings from encode_text().
+        Use this for text-image alignment losses, NOT for the main code path.
+        """
+        if hasattr(self.full_model.visual, 'head') and hasattr(self.full_model.visual.head, 'proj'):
+            proj = image_feat.permute(0, 2, 3, 1)
+            proj = self.full_model.visual.head.proj(proj)
+            return proj.permute(0, 3, 1, 2)
+        else:
+            return image_feat
 
 
 class ResizeAndClassify(nn.Module):
@@ -283,10 +289,12 @@ class ClusterLookup(nn.Module):
         self.n_classes = n_classes
         self.dim = dim
         self.clusters = torch.nn.Parameter(torch.randn(n_classes, dim))
+        torch.nn.init.orthogonal_(self.clusters)
 
     def reset_parameters(self):
         with torch.no_grad():
             self.clusters.copy_(torch.randn(self.n_classes, self.dim))
+            torch.nn.init.orthogonal_(self.clusters)
 
     def init_from(self, embeddings: torch.Tensor):
         with torch.no_grad():
@@ -313,7 +321,13 @@ class ClusterLookup(nn.Module):
         # Marginal entropy maximization to prevent collapse
         avg_probs = cluster_probs.mean(dim=(0, 2, 3))
         entropy = -(avg_probs * torch.log(avg_probs + 1e-8)).sum()
-        cluster_loss -= 1.5 * entropy
+        cluster_loss -= 0.5 * entropy
+
+        # Cluster diversity regularization: penalize pairwise cosine similarity between centroids
+        sim_matrix = torch.matmul(normed_clusters, normed_clusters.t())
+        eye = torch.eye(self.n_classes, device=sim_matrix.device)
+        diversity_loss = (sim_matrix * (1 - eye)).pow(2).sum() / (self.n_classes * (self.n_classes - 1) + 1e-8)
+        cluster_loss += 1.0 * diversity_loss
 
         if log_probs:
             return nn.functional.log_softmax(inner_products * alpha, dim=1)

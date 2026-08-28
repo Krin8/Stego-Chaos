@@ -2,6 +2,7 @@ import matplotlib
 matplotlib.use('Agg')
 import os
 
+from scipy.optimize import linear_sum_assignment
 from torch.optim.lr_scheduler import LambdaLR
 from utils import *
 from modules import *
@@ -140,7 +141,6 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         return torch.cat([code, coords], dim=1)  # [B, C+2, H, W]
 
 
-
     def forward(self, x):
         # in lightning, forward defines the prediction/inference actions
         return self.net(x)[1]
@@ -253,9 +253,12 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             loss += crf_weight * crf
 
         if getattr(self.cfg, "use_text_prompts", False) and getattr(self, "text_embeddings", None) is not None:
-            normed_code = F.normalize(code, dim=1)
-            normed_text = F.normalize(self.text_embeddings, dim=1).to(code.device)
-            sim = torch.einsum("bchw,nc->bnhw", normed_code, normed_text) / 0.07
+            # Project raw backbone features into BiomedCLIP's CLIP joint space
+            # so they are comparable with text embeddings from encode_text()
+            clip_feats = self.net.get_visual_proj_features(feats.detach())
+            normed_clip = F.normalize(clip_feats, dim=1)
+            normed_text = F.normalize(self.text_embeddings, dim=1).to(clip_feats.device)
+            sim = torch.einsum("bchw,nc->bnhw", normed_clip, normed_text) / 0.07
             soft_probs = F.softmax(sim, dim=1)
             entropy = -(soft_probs * torch.log(soft_probs + 1e-6)).sum(dim=1)
             text_align_loss = entropy.mean()
@@ -275,8 +278,8 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
         self.log('loss/linear', linear_loss, **log_args)
 
         code_with_pos = self._add_spatial_coords(code)
-        cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=5.0)
-        loss += cluster_loss
+        cluster_loss, cluster_probs = self.cluster_probe(code_with_pos, alpha=2.0)
+        loss += 2.0 * cluster_loss
         self.log('loss/cluster', cluster_loss, **log_args)
         self.log('loss/total', loss, **log_args)
 
@@ -324,7 +327,7 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
             self.linear_metrics.update(linear_preds, label)
 
             code_with_pos = self._add_spatial_coords(code)
-            cluster_loss, cluster_preds = self.cluster_probe(code_with_pos, None)
+            cluster_loss, cluster_preds = self.cluster_probe(code_with_pos, alpha=2.0)
             cluster_preds = cluster_preds.argmax(1)
 
             # ── Cluster Probe Debugging ──────────────────────────────────
@@ -413,8 +416,14 @@ class LitUnsupervisedSegmenter(pl.LightningModule):
                 output_num = random.randint(0, len(self.validation_step_outputs) - 1)
                 output = {k: v.detach().cpu() for k, v in self.validation_step_outputs[output_num].items()}
 
-                fig, ax = plt.subplots(4, self.cfg.n_images, figsize=(self.cfg.n_images * 3, 4 * 3))
-                for i in range(self.cfg.n_images):
+                n_actual = output["img"].shape[0]
+                fig, ax = plt.subplots(4, n_actual, figsize=(n_actual * 3, 4 * 3))
+                
+                # Handle edge case where n_actual is 1 (ax is 1D array)
+                if n_actual == 1:
+                    ax = ax.reshape(4, 1)
+
+                for i in range(n_actual):
                     ax[0, i].imshow(prep_for_plot(output["img"][i]))
                     ax[1, i].imshow(self.label_cmap[output["label"][i]])
                     ax[2, i].imshow(self.label_cmap[output["linear_preds"][i]])
