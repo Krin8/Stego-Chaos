@@ -298,7 +298,7 @@ class CHAOS(Dataset):
                 cropped_mask,
                 ((pad_h, max_dim - h - pad_h), (pad_w, max_dim - w - pad_w)),
                 mode='constant',
-                constant_values=255
+                constant_values=0
             )
         else:
             padded_mask = None
