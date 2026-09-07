@@ -9,8 +9,8 @@ submitting_to_aml: False
 num_workers: 0
 max_steps: 5000
 batch_size: 16
-chaos_modality: "all"       # or "CT" or "T1DUAL" or "T2SPIR"
-chaos_n_classes: 5          # use 2 if CT only, 5 if MR or all
+chaos_modality: "CT"       # or "CT" or "T1DUAL" or "T2SPIR"
+chaos_n_classes: 2         # use 2 if CT only, 5 if MR or all
 
 num_neighbors: 7
 dataset_name: "chaos"
@@ -46,7 +46,7 @@ continuous: True
 dim: 128
 dropout: True
 zero_clamp: True
-spatial_weight: 0.0
+spatial_weight: 5.0
 hungarian_weight: 2.0
 
 lr: 1e-4

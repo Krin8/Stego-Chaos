@@ -262,9 +262,9 @@ class UnsupervisedMetrics(Metric):
             cluster_to_class = self.assignments[1]
             for missing_entry in missing:
                 if missing_entry == cluster_to_class.shape[0]:
-                    cluster_to_class = np.append(cluster_to_class, -1)
+                    cluster_to_class = np.append(cluster_to_class, 0)
                 else:
-                    cluster_to_class = np.insert(cluster_to_class, missing_entry + 1, -1)
+                    cluster_to_class = np.insert(cluster_to_class, missing_entry + 1, 0)
             cluster_to_class = torch.tensor(cluster_to_class)
             return cluster_to_class[clusters]
 
